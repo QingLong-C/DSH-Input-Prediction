@@ -215,6 +215,10 @@ const zhStrings = {
   readOnly: '当前部署不可写（内存模式）',
   /** 策略字段（非 volatile）只能改配置文件 */
   configOnly: '策略字段：host 端未开放写入，请改 cordis.patch.yml',
+  /** 显示设置 section（仅详情页显示） */
+  sectionDisplay: '显示设置',
+  showInSettings: '在设置中显示',
+  showInSettingsHint: '在设置对话框中显示本插件的设置页（刷新页面后生效）',
   /** 分组标题 */
   sectionLlm: 'LLM 下一条建议',
   sectionHistory: '历史前缀补全',
@@ -252,6 +256,9 @@ const zhStrings = {
 const enStrings: { [K in keyof typeof zhStrings]: (typeof zhStrings)[K] } = {
   readOnly: 'Not writable in this deployment (in-memory mode)',
   configOnly: 'Strategy field: not writable from the UI — edit cordis.patch.yml',
+  sectionDisplay: 'Display',
+  showInSettings: 'Show in settings',
+  showInSettingsHint: 'Show this plugin\'s settings page in the settings dialog (refresh to take effect)',
   sectionLlm: 'LLM next suggestion',
   sectionHistory: 'History prefix completion',
   helpFor: (label: string): string => `About ${label}`,
@@ -700,24 +707,24 @@ export function SuggestGhostCard({ scope, locale, surface }: SuggestGhostCardPro
        *  localStorage 非响应式，切换后需刷新页面生效。 */}
       {surface === 'detail' && (
         <section className="sgc-section" aria-labelledby="sgc-section-display">
-          <h3 className="sgc-section-heading" id="sgc-section-display">显示设置</h3>
+          <h3 className="sgc-section-heading" id="sgc-section-display">{t.sectionDisplay}</h3>
           <div className="sgc-section-fields">
             <div className="sgc-field">
               <div className="sgc-toggle-row">
                 <div className="sgc-label-group">
-                  <label className="sgc-toggle-label" htmlFor="sgc-show-settings">在设置中显示</label>
+                  <label className="sgc-toggle-label" htmlFor="sgc-show-settings">{t.showInSettings}</label>
                 </div>
                 <button
                   type="button"
                   id="sgc-show-settings"
                   role="switch"
                   aria-checked={showSettings}
-                  aria-label="在设置中显示"
+                  aria-label={t.showInSettings}
                   className="sgc-toggle-switch"
                   onClick={toggleShowSettings}
                 />
               </div>
-              <p className="sgc-toggle-description">在设置对话框中显示本插件的设置页（刷新页面后生效）</p>
+              <p className="sgc-toggle-description">{t.showInSettingsHint}</p>
             </div>
           </div>
         </section>
