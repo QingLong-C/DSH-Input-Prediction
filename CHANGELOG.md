@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.1] - 2026-10-10
+
+### 修复
+
+- **建议语言支持西里尔文字（俄语等）**：`suggestionLanguage` 新增 `hasCyrillic` 检测，俄语用户不再收到英文建议（[GitHub #1](https://github.com/WuJiaoJue/dsh-suggest-ghost/issues/1)）
+- 非 CJK/非西里尔文字回退到「镜像用户语言」指令，覆盖所有文字系统（法语、德语、西班牙语、阿拉伯语等）
+- 新增冒烟测试覆盖多语言场景
+
 ## [0.4.0] - 2026-09-29
 
 ### 重大变更

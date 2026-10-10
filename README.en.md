@@ -6,7 +6,7 @@
 
 **English** | [简体中文](README.md)
 
-[![version](https://img.shields.io/badge/version-0.4.0-0EA5E9)](https://github.com/WuJiaoJue/dsh-suggest-ghost)
+[![version](https://img.shields.io/badge/version-0.4.1-0EA5E9)](https://github.com/WuJiaoJue/dsh-suggest-ghost)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![DSH](https://img.shields.io/badge/DeepSeek%20Harness-0.2.0--rc.2-4D6BFE)](https://github.com/deepseek-ai/deepseek-harness)
 
