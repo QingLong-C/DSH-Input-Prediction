@@ -1,21 +1,17 @@
 /**
- * SuggestGhost 设置卡片：渲染到 WebUI 设置 → Plugins 面板
- * （settings.plugin.item 槽位），编辑 `suggest-ghost` settings 命名空间。
- * React 组件，运行时从宿主解析 react（esbuild external）。
+ * SuggestGhost 设置卡片：渲染到 WebUI 设置 → 设置页槽位（`settings.section`），
+ * 编辑 `suggest-ghost` settings 命名空间。React 组件，运行时从宿主解析 react
+ * （esbuild external）。
  *
- * 视觉对齐官方 PluginCard（dsh-client-ui-settings-plugins，私有组件无法
- * import，这里按其发布的 CSS 逐 token 自实现）：
- * - 卡片：bg-layer-3 底、12px 圆角、hover/展开时边框 label-dimmed、
- *   展开底色切 bg-layer-2，.16s 过渡；
- * - header：14px 16px 内边距、name 15px/600、description 13px tertiary、
- *   focus-visible 品牌色 outline；「未保存」为中性胶囊徽章（非彩色文字）；
- * - body：顶部分隔线两端内缩 16px（margin 0 16px）；
- * - 字段：纵向堆叠（标签在上、控件居中、提示在下，字段间分隔线），
- *   输入框 34px 高、8px 圆角、border-l2、bg-layer-3、focus 边框品牌色；
- * - footer：顶部分隔线、按钮靠右；保存按钮为官方单色样式
- *   （label-primary 底 + bg-layer-3 字，非蓝色）；数字字段带非法校验
- *   （label-error 提示，与官方 ValueField 行为一致）。
- * 样式经 <style> 注入（sgc- 前缀类名），与官方 CSS 注入方式相同。
+ * 视觉对齐官方 SettingsForm（dsh-client-ui-primitives，参考 dsh-later 的
+ * SchedulerSettingsCard 同款实现）——**裸表单 + section 分组布局**，无卡片
+ * chrome（无可折叠头部、无边框、无背景）：
+ * - section：`padding 16px 0`，标题 13px/600（llm / history 两个 section）；
+ * - 字段：`padding 12px 0`，label 13px/500 在上、控件在下、无字段分隔线；
+ * - 布尔字段：官方 toggle 行（label 左 + switch 右，36×20 圆角滑块）；
+ * - 帮助按钮：24×24、8px 圆角、12px 圆圈问号图标，点击展开字段说明；
+ * - footer：保存/放弃按钮靠右（无顶部分隔线）。
+ * 样式经 <style> 注入（styles.ts，sgc- 前缀类名），与官方 CSS 注入方式相同。
  *
  * 文案双语：字段 label/hint 直接存 { zh, en } 双值，chrome 微文案由
  * zh 源字典 + en 映射类型约束键集一致；语言经 useGhostT 跟随宿主 DSH
@@ -24,10 +20,14 @@
  */
 
 import { useEffect, useRef, useState, type ReactElement } from 'react';
-import type { SettingsScope } from '@deepseek-ai/dsh-settings';
+// 0.1.7 移除了内核 settingsScope 服务；卡片依赖的 scope 最小面在 client 侧
+// 本地声明，由 index.ts 的 remoteSettingsScope() 适配器实现。
+import type { PluginSettingsScope } from './settings-scope.ts';
+import type { ScopeSnapshot } from './index.ts';
 import type { HotnessOp } from '../domain.ts';
 import { keyEventToSpec } from './keyspec.ts';
 import { useGhostT, type GhostLang, type LocaleFaceLike } from './useGhostT.ts';
+import { injectStyles } from './styles.ts';
 
 /** 字段输入形态。 */
 export type FieldKind = 'number' | 'text' | 'boolean' | 'key';
@@ -39,13 +39,20 @@ export interface Bilingual {
 }
 
 /** 配置字段定义（key / 显示名 / 提示 / 输入形态 / 所属分组）。
- * label/hint 为 { zh, en } 双值，按 useGhostT 解析出的语言取用。 */
+ * label/hint 为 { zh, en } 双值，按 useGhostT 解析出的语言取用。
+ *
+ * `writable: false` = **策略字段**，host 端刻意没标 `.volatile()`，因此写不进去
+ * （内核的 `SettingsForms.write()` 只接受 volatile 路径，非 volatile 直接抛错）。
+ * 这类字段在卡片里以只读呈现并标注来源，避免用户改了「保存」却静默无效——
+ * 这正是 0.1.7 把策略参数与用户可调项分开之后必须显式表达的区别。 */
 export const GHOST_FIELDS: ReadonlyArray<{
   readonly key: string;
   readonly label: Bilingual;
   readonly hint: Bilingual;
   readonly kind: FieldKind;
   readonly section: 'llm' | 'history';
+  /** 是否可经设置页写回（false = 只能改配置文件）。 */
+  readonly writable: boolean;
 }> = [
   // —— LLM 下一条建议 ——
   {
@@ -57,6 +64,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'number',
     section: 'llm',
+    writable: false,
   },
   {
     key: 'maxSuggestionChars',
@@ -64,6 +72,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     hint: { zh: '幽灵文本可见字符数上限', en: 'Max visible characters of the ghost text' },
     kind: 'number',
     section: 'llm',
+    writable: false,
   },
   {
     key: 'maxRecentTurns',
@@ -74,6 +83,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'number',
     section: 'llm',
+    writable: false,
   },
   {
     key: 'maxTranscriptChars',
@@ -84,6 +94,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'number',
     section: 'llm',
+    writable: false,
   },
   {
     key: 'timeoutMs',
@@ -94,6 +105,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'number',
     section: 'llm',
+    writable: false,
   },
   {
     key: 'acceptKey',
@@ -104,6 +116,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'key',
     section: 'llm',
+    writable: true,
   },
   {
     key: 'llmEnabled',
@@ -114,6 +127,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'boolean',
     section: 'llm',
+    writable: true,
   },
   {
     key: 'provider',
@@ -124,6 +138,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'text',
     section: 'llm',
+    writable: false,
   },
   {
     key: 'model',
@@ -134,6 +149,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'text',
     section: 'llm',
+    writable: false,
   },
   // —— 历史前缀补全 ——
   {
@@ -145,6 +161,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'boolean',
     section: 'history',
+    writable: true,
   },
   {
     key: 'historyCrossSession',
@@ -155,6 +172,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'boolean',
     section: 'history',
+    writable: true,
   },
   {
     key: 'historyMaxEntries',
@@ -165,6 +183,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'number',
     section: 'history',
+    writable: true,
   },
   {
     key: 'historyMinChars',
@@ -175,6 +194,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'number',
     section: 'history',
+    writable: true,
   },
   {
     key: 'wordAccept',
@@ -185,20 +205,21 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'boolean',
     section: 'history',
+    writable: true,
   },
 ];
 
 /** 卡片 chrome 微文案源字典（zh）：键集为唯一事实来源。 */
 const zhStrings = {
-  /** header 描述 */
-  description: '输入预测：历史前缀补全 + LLM 下一条建议（草稿为空时）。改动保存后立即生效。',
-  /** 未保存徽章 */
-  unsaved: '未保存',
   /** 只读提示 */
   readOnly: '当前部署不可写（内存模式）',
+  /** 策略字段（非 volatile）只能改配置文件 */
+  configOnly: '策略字段：host 端未开放写入，请改 cordis.patch.yml',
   /** 分组标题 */
   sectionLlm: 'LLM 下一条建议',
   sectionHistory: '历史前缀补全',
+  /** 帮助按钮无障碍标签（label 为字段名） */
+  helpFor: (label: string): string => `${label}说明`,
   /** footer 状态与按钮 */
   saved: '已保存',
   discard: '放弃修改',
@@ -206,9 +227,6 @@ const zhStrings = {
   save: '保存',
   /** 数字字段校验错误 */
   invalidNumber: '请输入数字',
-  /** 布尔字段选项 */
-  optionOn: '开启',
-  optionOff: '关闭',
   /** 快捷键控件 */
   keyCapturing: '按下组合键…（Esc 取消）',
   keyEmpty: '点击设置快捷键',
@@ -232,19 +250,16 @@ const zhStrings = {
 
 /** en 字典：映射类型约束与 zh 键集完全一致（缺键/多键均为编译期错误）。 */
 const enStrings: { [K in keyof typeof zhStrings]: (typeof zhStrings)[K] } = {
-  description:
-    'Input prediction: history prefix completion + LLM next suggestion (while the draft is empty). Changes take effect right after saving.',
-  unsaved: 'Unsaved',
   readOnly: 'Not writable in this deployment (in-memory mode)',
+  configOnly: 'Strategy field: not writable from the UI — edit cordis.patch.yml',
   sectionLlm: 'LLM next suggestion',
   sectionHistory: 'History prefix completion',
+  helpFor: (label: string): string => `About ${label}`,
   saved: 'Saved',
   discard: 'Discard changes',
   saving: 'Saving…',
   save: 'Save',
   invalidNumber: 'Enter a number',
-  optionOn: 'On',
-  optionOff: 'Off',
   keyCapturing: 'Press a key combo… (Esc to cancel)',
   keyEmpty: 'Click to set a shortcut',
   // —— Hotness management ——
@@ -271,83 +286,14 @@ export type GhostStrings = { [K in keyof typeof zhStrings]: (typeof zhStrings)[K
 /** 全部语言字典（键集一致，由 enStrings 的映射类型保证）。 */
 const GHOST_STRINGS: Record<GhostLang, GhostStrings> = { zh: zhStrings, en: enStrings };
 
-/** 卡片样式（对齐官方 PluginCard 的 token 与规格；sgc- 前缀防冲突）。 */
-const CARD_CSS = [
-  '.sgc-card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;list-style:none;transition:border-color .16s,background .16s}',
-  '.sgc-card:hover{border-color:var(--dsw-alias-label-dimmed)}',
-  '.sgc-cardOpen{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}',
-  '.sgc-header{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:none;border:0;border-radius:12px;display:flex;align-items:center;gap:12px;padding:14px 16px}',
-  '.sgc-header:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}',
-  '.sgc-headText{display:flex;flex-direction:column;gap:4px;flex:1;min-width:0}',
-  '.sgc-name{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}',
-  '.sgc-description{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}',
-  '.sgc-pending{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;font-weight:500;line-height:17px;flex:none}',
-  '.sgc-chevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}',
-  '.sgc-chevronOpen{transform:rotate(180deg)}',
-  '.sgc-body{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding-bottom:8px}',
-  '.sgc-readOnly{color:var(--dsw-alias-label-tertiary);margin:12px 0 0;font-size:12px;line-height:1.5}',
-  '.sgc-section{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:500;line-height:1.5;margin:14px 0 0}',
-  '.sgc-section+.sgc-field{border-top:0}',
-  '.sgc-sectionBtn{appearance:none;width:100%;font:inherit;background:none;border:0;text-align:left;cursor:pointer;display:flex;align-items:center;justify-content:space-between;gap:8px;color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:500;line-height:1.5;margin:14px 0 0;padding:0}',
-  '.sgc-sectionBtn:hover .sgc-sectionBtnText{color:var(--dsw-alias-label-secondary)}',
-  '.sgc-sectionBtn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:4px}',
-  '.sgc-sectionBtnText{min-width:0}',
-  '.sgc-field{display:flex;flex-direction:column;gap:6px;padding:12px 0}',
-  '.sgc-field+.sgc-field{border-top:1px solid var(--dsw-alias-border-l2)}',
-  '.sgc-fieldHead{display:flex;align-items:center;gap:8px}',
-  '.sgc-label{min-width:0;color:var(--dsw-alias-label-primary);font-size:13px;font-weight:500;line-height:1.5}',
-  '.sgc-input{box-sizing:border-box;width:100%;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;font:inherit;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}',
-  '.sgc-input:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}',
-  '.sgc-input:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
-  '.sgc-inputInvalid{border-color:var(--dsw-alias-state-error-primary)}',
-  '.sgc-key{box-sizing:border-box;width:100%;appearance:none;font:inherit;text-align:left;cursor:pointer;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);height:34px;color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 12px;font-size:13px;line-height:1.5}',
-  '.sgc-key:focus-visible{border-color:var(--dsw-alias-brand-primary);outline:none}',
-  '.sgc-key:disabled{color:var(--dsw-alias-label-tertiary);cursor:default}',
-  '.sgc-keyCapturing,.sgc-keyCapturing:focus-visible{border-color:var(--dsw-alias-brand-primary)}',
-  '.sgc-invalid{color:var(--dsw-alias-state-error-primary);margin:0;font-size:12px;line-height:1.5}',
-  '.sgc-hint{color:var(--dsw-alias-label-tertiary);margin:0;font-size:12px;line-height:1.5}',
-  '.sgc-footer{border-top:1px solid var(--dsw-alias-border-l2);display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:12px 0 4px}',
-  '.sgc-status{flex:1;min-width:0;color:var(--dsw-alias-state-success-primary);font-size:12px;line-height:1.5}',
-  '.sgc-save,.sgc-discard{appearance:none;font:inherit;cursor:pointer;border:1px solid transparent;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}',
-  '.sgc-save{background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3)}',
-  '.sgc-discard{border-color:var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary);background:none}',
-  '.sgc-discard:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-dimmed)}',
-  '.sgc-save:disabled,.sgc-discard:disabled{opacity:.4;cursor:default}',
-  '.sgc-save:focus-visible,.sgc-discard:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
-  // —— 热度管理分组 ——
-  '.sgc-hotList{display:flex;flex-direction:column;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;overflow:hidden;max-height:320px;overflow-y:auto}',
-  '.sgc-hotRow{display:flex;align-items:center;gap:8px;padding:6px 10px;min-width:0}',
-  '.sgc-hotRow+.sgc-hotRow{border-top:1px solid var(--dsw-alias-border-l2)}',
-  '.sgc-hotRow:hover{background:var(--dsw-alias-bg-layer-2)}',
-  '.sgc-hotPinFlag{flex:none;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 7px;font-size:11px;font-weight:500;line-height:16px;white-space:nowrap}',
-  '.sgc-hotText{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary);font-size:13px;line-height:1.5}',
-  '.sgc-hotCount{flex:none;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums}',
-  '.sgc-hotBtn{flex:none;appearance:none;font:inherit;cursor:pointer;border:1px solid var(--dsw-alias-border-l2);background:none;border-radius:6px;padding:2px 8px;font-size:12px;line-height:1.4;color:var(--dsw-alias-label-secondary)}',
-  '.sgc-hotBtn:hover:not(:disabled){color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-label-dimmed)}',
-  '.sgc-hotBtn:disabled{opacity:.4;cursor:default}',
-  '.sgc-hotBtn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}',
-  '.sgc-hotBtnDanger:hover:not(:disabled){color:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary)}',
-  '.sgc-hotAdd{display:flex;gap:8px;margin-top:8px}',
-  '.sgc-hotAdd .sgc-input{flex:1;min-width:0;height:30px;font-size:12px}',
-  '.sgc-hotMeta{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:8px 0 0}',
-  '.sgc-hotDanger{color:var(--dsw-alias-state-error-primary)}',
-].join('');
-
-/** 样式注入标记（幂等：重复加载不重复插入）。 */
-const STYLE_ID = 'dsh-suggest-ghost-card-css';
-if (typeof document !== 'undefined' && document.getElementById(STYLE_ID) === null) {
-  const tag = document.createElement('style');
-  tag.id = STYLE_ID;
-  tag.dataset.pluginCss = 'dsh-suggest-ghost/settings-card';
-  tag.textContent = CARD_CSS;
-  document.head.appendChild(tag);
-}
-
 /** 卡片组件 props：由槽位注册的 inject 提供。 */
 export interface SuggestGhostCardProps {
-  scope: SettingsScope<Record<string, unknown>>;
+  scope: PluginSettingsScope<ScopeSnapshot>;
   /** 宿主 locale 服务 face（可选增强；缺失或旧宿主回退中文）。 */
   locale?: LocaleFaceLike;
+  /** 卡片所在表面：详情页（detail）或设置对话框（settings）。
+   *  详情页显示「在设置中显示」开关；设置页不显示。 */
+  surface?: 'detail' | 'settings';
 }
 
 /** 会话状态快照的值类型。 */
@@ -358,11 +304,22 @@ function displayValue(v: unknown): string {
   return v === undefined || v === null ? '' : String(v);
 }
 
-/** 与官方 PluginCard 视觉一致的 chevron-down 图标（内联 SVG，零依赖）。 */
+/** 折叠按钮的 chevron-down 图标（内联 SVG，零依赖；热度管理分组折叠用）。 */
 function ChevronDown({ className }: { className?: string }): ReactElement {
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" className={className} aria-hidden="true">
       <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** 官方同款帮助图标：12px 圆圈问号（对齐 dsh-later 帮助按钮的 SVG）。 */
+function HelpIcon(): ReactElement {
+  return (
+    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true" strokeWidth="1">
+      <path d="M12.5757 7.00012C12.5757 3.92085 10.0794 1.42463 7.00012 1.42456C3.9208 1.42456 1.42456 3.9208 1.42456 7.00012C1.42463 10.0794 3.92085 12.5757 7.00012 12.5757C10.0793 12.5756 12.5756 10.0793 12.5757 7.00012ZM13.8002 7.00012C13.8001 10.7559 10.7559 13.8001 7.00012 13.8002C3.2443 13.8002 0.199291 10.7559 0.199219 7.00012C0.199219 3.24426 3.24426 0.199219 7.00012 0.199219C10.7559 0.199291 13.8002 3.2443 13.8002 7.00012Z" fill="currentColor"/>
+      <path d="M7.6127 3.18921V4.55986H6.38735V3.18921H7.6127Z" fill="currentColor"/>
+      <path d="M7.6127 5.68921V10.8109H6.38735V5.68921H7.6127Z" fill="currentColor"/>
     </svg>
   );
 }
@@ -424,7 +381,7 @@ interface HotPushEntry {
  * （scope.set 直接写入，不进卡片的暂存/保存流程）；列表数据来自 `_push`
  * 实时推送，host 消费后回推最新状态，本组件随订阅无刷新重渲染。 */
 function HotnessSection({ scope, pushRaw, writable, busy, lang, t }: {
-  scope: SettingsScope<Record<string, unknown>>;
+  scope: PluginSettingsScope<Record<string, unknown>>;
   /** 当前 `_push` 字段原始值（由卡片从 scope 快照透传）。 */
   pushRaw: unknown;
   writable: boolean;
@@ -562,9 +519,12 @@ function HotnessSection({ scope, pushRaw, writable, busy, lang, t }: {
   );
 }
 
-/** 设置卡片：读取/编辑/保存 suggest-ghost 命名空间（默认收起，点击头部展开）。
+/** 设置卡片：读取/编辑/保存 suggest-ghost 命名空间。
+ * 裸表单 + section 分组布局（llm / history 两个 section + 可折叠的热度管理），
  * 文案跟随宿主界面语言（locale 缺失回退中文），语言切换实时重渲染。 */
-export function SuggestGhostCard({ scope, locale }: SuggestGhostCardProps): ReactElement | null {
+export function SuggestGhostCard({ scope, locale, surface }: SuggestGhostCardProps): ReactElement | null {
+  // 样式注入（幂等；卸载时随组件清理）。
+  useEffect(() => injectStyles(), []);
   const lang = useGhostT(locale);
   const t = GHOST_STRINGS[lang];
   const [snap, setSnap] = useState(scope.getSnapshot());
@@ -572,15 +532,31 @@ export function SuggestGhostCard({ scope, locale }: SuggestGhostCardProps): Reac
   const [edits, setEdits] = useState<Record<string, string | boolean | number>>({});
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
-  // 折叠状态（卡片本地）：默认收起；折叠不丢失 staged edits。
-  const [open, setOpen] = useState(false);
+  /** 帮助按钮展开态（对齐官方 _helpButton_：aria-expanded 切换）。 */
+  const [helpOpen, setHelpOpen] = useState<Record<string, boolean>>({});
   // 热度管理分组折叠：默认收起（管理列表较长，配置区保持紧凑）。
   const [hotOpen, setHotOpen] = useState(false);
+
+  // 「在设置中显示」开关：仅详情页显示，控制 settings.section 是否注册。
+  // localStorage 非响应式，切换后需刷新页面生效。
+  const SHOW_SETTINGS_KEY = 'dsh-suggest-ghost:show-settings-section';
+  const [showSettings, setShowSettings] = useState<boolean>(() => {
+    if (typeof localStorage === 'undefined') return false;
+    return localStorage.getItem(SHOW_SETTINGS_KEY) === 'true';
+  });
+  const toggleShowSettings = (): void => {
+    const next = !showSettings;
+    setShowSettings(next);
+    if (typeof localStorage !== 'undefined') {
+      if (next) localStorage.setItem(SHOW_SETTINGS_KEY, 'true');
+      else localStorage.removeItem(SHOW_SETTINGS_KEY);
+    }
+  };
 
   if (snap.status === 'unavailable') return null; // 命名空间未暴露时不显示卡片
   const value = (snap.value ?? {}) as Value;
   const writable = snap.writable && snap.status === 'ready';
-  const isDirty = Object.keys(edits).length > 0;
+  const isDirty = Object.keys(edits).some(k => GHOST_FIELDS.find(f => f.key === k)?.writable === true);
 
   const fieldValue = (key: string): string => {
     if (key in edits) return String(edits[key]);
@@ -602,6 +578,8 @@ export function SuggestGhostCard({ scope, locale }: SuggestGhostCardProps): Reac
     try {
       for (const [key, raw] of Object.entries(edits)) {
         const def = GHOST_FIELDS.find(f => f.key === key)!;
+        // 策略字段（非 volatile）host 端拒绝写入，跳过以免整批保存被它带崩。
+        if (!def.writable) continue;
         let final: string | number | boolean = raw;
         if (def.kind === 'number') final = Number(raw);
         else if (def.kind === 'boolean') final = raw === true || raw === 'true';
@@ -623,45 +601,91 @@ export function SuggestGhostCard({ scope, locale }: SuggestGhostCardProps): Reac
 
   const renderField = (f: (typeof GHOST_FIELDS)[number]): ReactElement => {
     const invalid = fieldInvalid(f);
-    const inputClass = invalid ? 'sgc-input sgc-inputInvalid' : 'sgc-input';
-    const control = f.kind === 'boolean' ? (
-      <select
-        className={inputClass}
-        id={`sgc-field-${f.key}`}
-        value={fieldValue(f.key) === 'true' ? 'true' : 'false'}
-        disabled={!writable || busy}
-        onChange={e => setField(f.key, e.target.value === 'true')}
-      >
-        <option value="true">{t.optionOn}</option>
-        <option value="false">{t.optionOff}</option>
-      </select>
-    ) : f.kind === 'key' ? (
+    // 策略字段（非 volatile）写不进 host：只读呈现，并说明来源，避免「改了没反应」。
+    const editable = writable && f.writable;
+    const fieldId = `sgc-field-${f.key}`;
+    const helpId = `sgc-help-${f.key}`;
+    const helpOpenNow = helpOpen[f.key] === true;
+    const helpAria = t.helpFor(f.label[lang]);
+
+    /** 布尔字段：官方 toggle 行（label 左 + switch 右，说明常驻在下）。
+     * 语义与旧 select 完全一致：仅显式 'true' 视为开（未设置显示为关）。 */
+    if (f.kind === 'boolean') {
+      const checked = fieldValue(f.key) === 'true';
+      return (
+        <div key={f.key} className="sgc-field">
+          <div className="sgc-toggle-row">
+            <div className="sgc-label-group">
+              <label className="sgc-toggle-label" htmlFor={fieldId}>{f.label[lang]}</label>
+            </div>
+            <button
+              type="button"
+              id={fieldId}
+              role="switch"
+              aria-checked={checked}
+              aria-label={f.label[lang]}
+              className="sgc-toggle-switch"
+              disabled={!editable || busy}
+              onClick={() => setField(f.key, !checked)}
+            />
+          </div>
+          <p className={invalid ? 'sgc-invalid' : 'sgc-toggle-description'}>
+            {invalid ? t.invalidNumber : f.hint[lang]}
+          </p>
+          {!f.writable && <p className="sgc-configOnly">{t.configOnly}</p>}
+        </div>
+      );
+    }
+
+    const inputClass = [
+      invalid ? 'sgc-input sgc-inputInvalid' : 'sgc-input',
+      f.writable ? '' : 'sgc-inputReadOnly',
+    ].filter(Boolean).join(' ');
+    const control = f.kind === 'key' ? (
       <KeyField
-        id={`sgc-field-${f.key}`}
+        id={fieldId}
         value={fieldValue(f.key)}
-        disabled={!writable || busy}
+        disabled={!editable || busy}
         t={t}
         onChange={spec => setField(f.key, spec)}
       />
     ) : (
       <input
         className={inputClass}
-        id={`sgc-field-${f.key}`}
+        id={fieldId}
         type="text"
         {...(f.kind === 'number' ? { inputMode: 'numeric' as const } : {})}
         {...(invalid ? { 'aria-invalid': true } : {})}
         value={fieldValue(f.key)}
-        disabled={!writable || busy}
+        disabled={!editable || busy}
         onChange={e => setField(f.key, e.target.value)}
       />
     );
     return (
       <div key={f.key} className="sgc-field">
         <div className="sgc-fieldHead">
-          <label className="sgc-label" htmlFor={`sgc-field-${f.key}`}>{f.label[lang]}</label>
+          <div className="sgc-label-group">
+            <label className="sgc-label" htmlFor={fieldId}>{f.label[lang]}</label>
+            <button
+              type="button"
+              className={helpOpenNow ? 'sgc-help-btn sgc-help-btnOpen' : 'sgc-help-btn'}
+              aria-label={helpAria}
+              aria-expanded={helpOpenNow}
+              aria-controls={helpId}
+              onClick={() => setHelpOpen(prev => ({ ...prev, [f.key]: !helpOpenNow }))}
+            >
+              <HelpIcon />
+            </button>
+          </div>
         </div>
         {control}
-        <p className={invalid ? 'sgc-invalid' : 'sgc-hint'}>{invalid ? t.invalidNumber : f.hint[lang]}</p>
+        {invalid && <p className="sgc-invalid" role="status">{t.invalidNumber}</p>}
+        {helpOpenNow && (
+          <div id={helpId} role="region" aria-label={helpAria} className="sgc-help">
+            <p>{f.hint[lang]}</p>
+          </div>
+        )}
+        {!f.writable && <p className="sgc-configOnly">{t.configOnly}</p>}
       </div>
     );
   };
@@ -670,37 +694,56 @@ export function SuggestGhostCard({ scope, locale }: SuggestGhostCardProps): Reac
   const historyFields = GHOST_FIELDS.filter(f => f.section === 'history');
 
   return (
-    <li className={open ? 'sgc-card sgc-cardOpen' : 'sgc-card'}>
-      <button
-        type="button"
-        className="sgc-header"
-        aria-expanded={open}
-        onClick={() => setOpen(o => !o)}
-      >
-        <span className="sgc-headText">
-          <span className="sgc-name">Suggest ghost</span>
-          <span className="sgc-description">{t.description}</span>
-        </span>
-        {isDirty && <span className="sgc-pending">{t.unsaved}</span>}
-        <ChevronDown className={open ? 'sgc-chevron sgc-chevronOpen' : 'sgc-chevron'} />
-      </button>
-      {open && (
-        <div className="sgc-body">
-          {!writable && <p className="sgc-readOnly">{t.readOnly}</p>}
-          <div className="sgc-section">{t.sectionLlm}</div>
-          {llmFields.map(renderField)}
-          <div className="sgc-section">{t.sectionHistory}</div>
-          {historyFields.map(renderField)}
-          <button
-            type="button"
-            className="sgc-sectionBtn"
-            aria-expanded={hotOpen}
-            onClick={() => setHotOpen(o => !o)}
-          >
-            <span className="sgc-sectionBtnText">{t.sectionHotness}</span>
-            <ChevronDown className={hotOpen ? 'sgc-chevron sgc-chevronOpen' : 'sgc-chevron'} />
-          </button>
-          {hotOpen && (
+    <div className="sgc-settings-form">
+      {!writable && <p className="sgc-readOnly" role="status">{t.readOnly}</p>}
+      {/* 仅详情页显示：控制设置对话框中是否出现本插件的设置页。
+       *  localStorage 非响应式，切换后需刷新页面生效。 */}
+      {surface === 'detail' && (
+        <section className="sgc-section" aria-labelledby="sgc-section-display">
+          <h3 className="sgc-section-heading" id="sgc-section-display">显示设置</h3>
+          <div className="sgc-section-fields">
+            <div className="sgc-field">
+              <div className="sgc-toggle-row">
+                <div className="sgc-label-group">
+                  <label className="sgc-toggle-label" htmlFor="sgc-show-settings">在设置中显示</label>
+                </div>
+                <button
+                  type="button"
+                  id="sgc-show-settings"
+                  role="switch"
+                  aria-checked={showSettings}
+                  aria-label="在设置中显示"
+                  className="sgc-toggle-switch"
+                  onClick={toggleShowSettings}
+                />
+              </div>
+              <p className="sgc-toggle-description">在设置对话框中显示本插件的设置页（刷新页面后生效）</p>
+            </div>
+          </div>
+        </section>
+      )}
+      <section className="sgc-section" aria-labelledby="sgc-section-llm">
+        <h3 className="sgc-section-heading" id="sgc-section-llm">{t.sectionLlm}</h3>
+        <div className="sgc-section-fields">{llmFields.map(renderField)}</div>
+      </section>
+      <section className="sgc-section" aria-labelledby="sgc-section-history">
+        <h3 className="sgc-section-heading" id="sgc-section-history">{t.sectionHistory}</h3>
+        <div className="sgc-section-fields">{historyFields.map(renderField)}</div>
+      </section>
+      <section className="sgc-section" aria-labelledby="sgc-section-hotness">
+        <button
+          type="button"
+          id="sgc-section-hotness"
+          className="sgc-sectionBtn"
+          aria-expanded={hotOpen}
+          aria-controls="sgc-hotness-body"
+          onClick={() => setHotOpen(o => !o)}
+        >
+          <span className="sgc-sectionBtnText">{t.sectionHotness}</span>
+          <ChevronDown className={hotOpen ? 'sgc-chevron sgc-chevronOpen' : 'sgc-chevron'} />
+        </button>
+        {hotOpen && (
+          <div id="sgc-hotness-body">
             <HotnessSection
               scope={scope}
               pushRaw={value._push}
@@ -709,16 +752,16 @@ export function SuggestGhostCard({ scope, locale }: SuggestGhostCardProps): Reac
               lang={lang}
               t={t}
             />
-          )}
-          <div className="sgc-footer">
-            {saved && <span className="sgc-status" role="status">{t.saved}</span>}
-            <button className="sgc-discard" disabled={!isDirty || busy} onClick={discard}>{t.discard}</button>
-            <button className="sgc-save" disabled={!writable || busy || !isDirty || anyInvalid} onClick={() => void save()}>
-              {busy ? t.saving : t.save}
-            </button>
           </div>
-        </div>
-      )}
-    </li>
+        )}
+      </section>
+      <div className="sgc-footer">
+        {saved && <span className="sgc-status" role="status">{t.saved}</span>}
+        <button className="sgc-discard" disabled={!isDirty || busy} onClick={discard}>{t.discard}</button>
+        <button className="sgc-save" disabled={!writable || busy || !isDirty || anyInvalid} onClick={() => void save()}>
+          {busy ? t.saving : t.save}
+        </button>
+      </div>
+    </div>
   );
 }

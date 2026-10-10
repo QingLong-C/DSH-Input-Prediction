@@ -8,7 +8,7 @@
 
 [![version](https://img.shields.io/badge/version-0.3.0-0EA5E9)](https://github.com/WuJiaoJue/dsh-suggest-ghost)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![DSH](https://img.shields.io/badge/DeepSeek%20Harness-0.1.2--rc.1-4D6BFE)](https://github.com/deepseek-ai/deepseek-harness)
+[![DSH](https://img.shields.io/badge/DeepSeek%20Harness-0.2.0--rc.2-4D6BFE)](https://github.com/deepseek-ai/deepseek-harness)
 
 > Input prediction plugin for DeepSeek Harness Web: after each turn completes, one auxiliary LLM call predicts your next prompt and renders it as ghost text in the input box when the draft is empty; while you type, it completes from the current conversation history by prefix match. **Tab** accepts the whole suggestion, **→** accepts word by word.
 
@@ -98,22 +98,66 @@ You can also override by id in cordis.patch.yml (as initial values for the above
 
 ## Compatibility
 
-Verified on both kernel generations (2026-09-07):
+Verified on five kernel generations (`0.1.5`, `0.1.7` and `0.2.0` re-measured 2026-09-29; the rest 2026-09-07):
 
-| DSH kernel | host entry link | runtime symbols | real boot (headless) | real boot (web) |
-|---|---|---|---|---|
-| `0.1.1-rc.2` | ✅ | ✅ 8/8 | ✅ past the plugin stage | ✅ client bundle HTTP 200 |
-| `0.1.2-rc.1` | ✅ | ✅ 8/8 | ✅ past the plugin stage | ✅ client bundle HTTP 200 |
+| DSH kernel | peer gate | host entry link | runtime symbols | isolated profile | settings page |
+|---|---|---|---|---|---|
+| `0.1.1-rc.2` | — | ✅ | ✅ 8/8 | ✅ | ✅ |
+| `0.1.2-rc.1` | — | ✅ | ✅ 8/8 | ✅ | ✅ |
+| `0.1.5-rc.3` | — | ✅ | ✅ 10/10 | ✅ | ✅ |
+| `0.1.7-rc.2` | — | ✅ | ✅ 10/10 | ✅ | ✅ |
+| `0.2.0-rc.2` | ✅ | ✅ | ✅ 10/10 | ✅ | ✅ |
 
-Peer deps are written as an **explicit generation list** (`^0.1.1-rc.2 || ^0.1.2-rc.1`) rather than `>=0.1.1-rc.2`: node-semver excludes prereleases from every range unless a comparator carries the same `[major.minor.patch]` tuple, so `^0.1.1-rc.2` is false for `0.1.2-rc.1`, and so is `*` — there is no range form that spans generations. **Every time upstream ships a new rc generation, add another entry here**, otherwise installation fails the peer check.
+### Peer enumeration, and the hard gate that starts at 0.2.0
 
-Three deliberate choices keep one codebase working across generations:
+Peer deps are written as an **explicit generation list** (`^0.1.1-rc.2 || ^0.1.2-rc.1 || … || ^0.2.0-rc.2`) rather than `>=0.1.1-rc.2`: node-semver excludes prereleases from every range unless a comparator carries the same `[major.minor.patch]` tuple, so `^0.1.1-rc.2` is false for `0.1.2-rc.1`, and so is `*` — there is no range form that spans generations. **Every time upstream ships a new rc generation, add another entry here.**
 
-- **No `settingsNamespace()`**: the helper was removed in `0.1.2`, and importing it at runtime makes the whole module fail to link. It only validated and returned the branded string unchanged, so the code asserts the literal instead (`'suggest-ghost' as SettingsNamespace`); format validation still happens inside `ctx.settings.register()` on both generations.
+**At `0.2.0` this stopped being an install-time hint and became a load-time hard rejection.** While composing a profile the kernel checks each peer with `semver.satisfies(runtimeVersion, range, { includePrerelease: true })` and skips the whole bundle on a miss:
+
+```
+dsh: skipping profile bundle "dsh-suggest-ghost": Error: Plugin … is incompatible
+with dsh 0.2.0-rc.2: peerDependencies {…}
+```
+
+Two details worth remembering:
+
+- the gate uses **`includePrerelease: true`**, so `^0.2.0` (without the rc) is false for `0.2.0-rc.2` — the entry must be written as `^0.2.0-rc.2`;
+- `dsh plugin allow-version` grants an **exact-version** exemption, which bypasses the check rather than fixing it. The real fix is still another enumeration entry.
+
+### The 0.1.7 settings rework (the only substantial source change)
+
+`0.1.7` removed the whole `settings.yaml` system, so the plugin's data channel had to move:
+
+| | `0.1.5` | `0.1.7+` |
+|---|---|---|
+| User-editable options | `ctx.settings.register(ns, schema, …)` | per-field `.volatile()` in `Config`; the kernel projects the **plugin's own Config schema** into a form, ns = Loader entry id |
+| host → client | `_push` on a `SettingsScope` | `ctx.settings.update(ns, {_push})` (`_push` marked volatile) |
+| client reads | `settingsScope.bind(ns).get()` | `remote.settings.describe()` (first read + event-driven re-read) |
+| client → host | `scope.set('_ops', …)` | `remote.settings.mutate(ns, [{op:'set',path:['_ops'],…}])` |
+| change signal (host) | `scope.watch` | `settings/document-updated(ns, revision)` event |
+| change signal (client) | `scope.subscribe` | `remote.$on('settings/document-updated')` |
+
+**The payload shape is unchanged** (the `_push` / `_ops` JSON, including the `suggestionSessionId` / `historySessionId` ownership guards) — only the carrier moved, so the client's parsing and ownership logic needed no rewrite.
+
+Three details that only surface when you try them:
+
+- **`Config` must not be marked `.volatile()` as a whole**, and `z.object({…}).volatile().dict` must not be spread back in — the former exposes the strategy parameters as form fields too, the latter drops each field's own `meta` during flattening and makes the entire form invisible. Mark **per field**.
+- **A volatile field resolves to a reference** (cosmokit's `Volatile<T>`), not a bare value, so reads must go through `.get()`. `flattenConfig()` flattens those references into plain values so the rest of the plugin is generation-agnostic; it also accepts bare values, so `0.1.5` and earlier keep working.
+- **`provider` / `model` changed from `z.string().min(1)` to `.default('')`**: once they are form fields, being required means the plugin "cannot start until filled in", while the intended meaning of empty is "inherit the main request's route".
+
+### Other cross-generation choices
+
+- **No `settingsNamespace()`**: the helper was removed in `0.1.2`, and importing it at runtime makes the whole module fail to link. It only validated and returned the branded string unchanged, so the code asserts the literal instead (`'suggest-ghost' as SettingsNamespace`).
 - **No `deepFreeze` import**: `0.1.1` exports it from `dsh-llm`, `0.1.2` moved it into the new `dsh-util-values` and stopped re-exporting it — and that package does not exist on `0.1.1`, so switching the import source would only break the other generation. `src/generate.ts` ships an equivalent implementation (iterative traversal, cycle-safe, skips `AbortSignal`).
-- **The client bundle takes no types from `@deepseek-ai/dsh-client-runtime`**: that package is `0.1.1`-only and was split out in `0.1.2`. `lib/client.js` was measured to have zero kernel imports, so it is generation-independent.
+- **The client bundle takes no types from `@deepseek-ai/dsh-client-runtime`**: that package is `0.1.1`-only and was split out in `0.1.2`. `lib/client.js` was measured to have zero kernel imports (only `react`), so it is generation-independent; the minimal `ctx.remote` face is declared client-side (see `RemoteLike` in `src/client/index.ts`).
+- **`source.kind` is `'user'`, not `'plugin'`**: `0.1.7` dropped the `plugin` kind and the `schedule` kind it added does not exist on `0.1.5`, so the two generations have no overlap. The field only builds a one-shot LLM request payload; it is not persisted or projected.
 
-How to reproduce: build an isolated profile for the kernel under test (point `$DSH_HOME` at a temp directory and hardlink its `node_modules` to that kernel tree with `cp -al`, so upward resolution cannot leak into the other generation), then check manifest composition with `dsh --profile <p> --dump-config`, and watch plugin loading via `dsh --profile <p> "say hi"` and `dsh --profile <p> -- --no-open --port <p>`. Both headless runs stop at `MISSING_CREDENTIAL` (the temp home has no credentials) — a point after plugins have loaded.
+### Known trade-offs
+
+- **Old settings do migrate**: a value tweaked on the `0.1.5` settings page (e.g. `historyMaxEntries`) was measured restoring as-is on `0.2.0` — the user layer stays in the profile document. What is *not* persisted is the in-memory volatile reference, so after a restart you read the persisted profile value rather than last run's memory value.
+- **No polling on the client**: what `0.1.7` removed along with `settingsScope` is only `scope.subscribe`. The kernel has a separate Host→client event channel — `ctx.remote.$on('settings/document-updated')`, on dsh-api-remotes' forwarding allowlist (mode `emit`). The kernel's own settings page drives `SettingsDescribeMirror` off exactly that. This plugin subscribes the same way, so `describe()` is issued only when the host actually pushes `_push`, plus once at startup and once per `connection/reset`.
+
+How to reproduce: build an isolated profile for the kernel under test (point `$DSH_HOME` at a temp directory and hardlink its `node_modules` to that kernel tree with `cp -al`, so upward resolution cannot leak into the other generation), then check manifest composition with `dsh --profile <p> --dump-config` — **on 0.2.0 this is the step that surfaces the peer-gate rejection** — and watch plugin loading via `dsh --profile <p> "say hi"` and `dsh --profile <p> -- --no-open --port <p>`. Headless runs stop at `MISSING_CREDENTIAL` (the temp home has no credentials) — a point after plugins have loaded.
 
 ## Development
 
@@ -133,18 +177,23 @@ scripts/             smoke tests and session log replay
 
 ### Cold-start semantics (why it works right after a restart)
 
-"No data after a restart" is a misreading: **the suggestion lives in `settings.yaml`'s `_push`, and history lives in the session log.**
+"No data after a restart" is a misreading: **history lives in the session log, and the host re-sends the suggestion after checking it semantically.**
 The old design used *time* as the criterion (invalidate on restart, seed only when an event arrives), which left two gaps.
 It now uses *semantics*:
 
 - The **history ring** is a cache of the session log: on a pull miss it is recomputed from the log (`ringFor`), so there is no
   "seeding moment" and therefore no race where a pull arrives before the first event. Live sessions maintain it incrementally.
-- A **suggestion** is valid iff its turn is still the session's last completed turn (`suggestionIsCurrent`). On startup the
-  persisted `_push` is read back and checked: still valid → restored as-is (your last suggestion is there when the page opens,
-  no need to wait for a new turn); provably stale → cleared; session not in the store yet (lazy restore pending) → left
-  untouched and reconciled by the first pull.
-- All three push paths (startup reconciliation / pull reply / hotness-restore re-push) share one state assembler
+- A **suggestion** is valid iff its turn is still the session's last completed turn (`suggestionIsCurrent`). The host runs
+  that check on every state assembly: still valid → restored as-is (your last suggestion is there when the page opens,
+  no need to wait for a new turn); provably stale → cleared.
+- All three push paths (pull reply / turn end / hotness-restore re-push) share one state assembler
   (`statePushOf`), and the client pulls at the single point where a session binding succeeds.
+
+> **Difference from 0.1.5**: there `_push` landed in `settings.yaml`, so the previous suggestion could be read back
+> after a restart. On `0.1.7+` volatile fields are not persisted, so **the last suggestion must be regenerated after a
+> restart** — it returns as soon as the next turn completes. History prefix completion and the hotness panel keep working
+> throughout, since they read the session log and the storage domain rather than a volatile field.
+> Do not confuse this with your *settings values*, which do live in the profile document and do migrate (see Known trade-offs).
 
 ```bash
 pnpm run build       # tsc compiles host + esbuild bundles client → lib/

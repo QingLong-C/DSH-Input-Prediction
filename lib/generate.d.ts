@@ -4,6 +4,7 @@
  * @module dsh-suggest-ghost/generate
  */
 import type { Context } from '@deepseek-ai/cordis';
+import type { Volatile } from '@deepseek-ai/cosmokit';
 import type { Session } from '@deepseek-ai/dsh-session';
 import { PROJECTION_KEY } from './domain.js';
 import type { SuggestGhostSuggested } from './domain.js';
@@ -25,6 +26,39 @@ export interface Config {
     /** LLM 下一条建议开关（默认开）；关闭后每回合不再调用建议模型。 */
     llmEnabled?: boolean;
 }
+/**
+ * 0.1.7 的用户可调项。
+ *
+ * 取 `Volatile<T> | T` 联合类型而非只取 `Volatile<T>`：0.1.7 把这些字段解析成
+ * cosmokit 引用（读值走 `.get()`），而 0.1.5/0.1.2 时代它们是裸值。`readVolatile`
+ * 同时认得两种形态，故类型层也必须同时容纳。
+ */
+export interface EditableConfig {
+    llmEnabled?: Volatile<boolean> | boolean;
+    historyEnabled?: Volatile<boolean> | boolean;
+    historyCrossSession?: Volatile<boolean> | boolean;
+    historyMaxEntries?: Volatile<number> | number;
+    historyMinChars?: Volatile<number> | number;
+    wordAccept?: Volatile<boolean> | boolean;
+    acceptKey?: Volatile<string> | string;
+}
+/** 内核解析后的插件配置：策略字段是裸值，可调字段是引用。 */
+export type ResolvedPluginConfig = Config & EditableConfig;
+/** 拍平后的配置：策略字段 + 可调字段，全部是裸值。 */
+export type FlatConfig = Config & {
+    llmEnabled: boolean;
+    historyEnabled: boolean;
+    historyCrossSession: boolean;
+    historyMaxEntries: number;
+    historyMinChars: number;
+    wordAccept: boolean;
+    acceptKey: string;
+};
+/**
+ * 把插件配置拍平成「策略 + 可调」的裸值视图。0.1.7 的可调项是引用，其余代码
+ * （effective()、client 渲染、热度快照上限）都按裸值读，不必知道代次差异。
+ */
+export declare function flattenConfig(config: ResolvedPluginConfig): FlatConfig;
 /** 校验并返回不可变配置。 */
 export declare function resolveConfig(config: Config): Config;
 /** 建议生成指令：只预测用户下一条提示词，禁止生成内容或元文本。 */

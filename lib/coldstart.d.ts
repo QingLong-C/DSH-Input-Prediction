@@ -31,6 +31,9 @@ export declare const HISTORY_PUSH_CAP = 300;
 export declare const HISTORY_TEXT_MAX_CHARS = 2000;
 /** 环容量 = 推送窗口的两倍（硬上限防泄漏）。 */
 export declare const RING_CAPACITY: number;
+/** 每会话建议表的容量（同时活跃的会话数上限；超出逐出最久未更新者）。
+ * 只存内存、不落盘（建议本就是可重建的 LLM 输出），故取小值即可。 */
+export declare const SUGGESTION_CACHE_CAP = 16;
 /**
  * 从一条会话事件提取可补全的用户输入文本（null = 跳过）。筛选语义与 client
  * `extractHistory` 对齐：只收 `source.kind === 'user'` 的 user/message 文本块，

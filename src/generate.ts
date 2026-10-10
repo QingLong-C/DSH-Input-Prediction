@@ -5,6 +5,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis';
+import type { Volatile } from '@deepseek-ai/cosmokit';
 import {
   BlockAssembler,
   createUserMessage,
@@ -73,14 +74,87 @@ export interface Config {
   llmEnabled?: boolean;
 }
 
+/**
+ * 0.1.7 的用户可调项。
+ *
+ * 取 `Volatile<T> | T` 联合类型而非只取 `Volatile<T>`：0.1.7 把这些字段解析成
+ * cosmokit 引用（读值走 `.get()`），而 0.1.5/0.1.2 时代它们是裸值。`readVolatile`
+ * 同时认得两种形态，故类型层也必须同时容纳。
+ */
+export interface EditableConfig {
+  llmEnabled?: Volatile<boolean> | boolean;
+  historyEnabled?: Volatile<boolean> | boolean;
+  historyCrossSession?: Volatile<boolean> | boolean;
+  historyMaxEntries?: Volatile<number> | number;
+  historyMinChars?: Volatile<number> | number;
+  wordAccept?: Volatile<boolean> | boolean;
+  acceptKey?: Volatile<string> | string;
+}
+
+/** 内核解析后的插件配置：策略字段是裸值，可调字段是引用。 */
+export type ResolvedPluginConfig = Config & EditableConfig;
+
+/**
+ * 读取一个可能缺失的可调字段：先问引用（0.1.7 的 `Volatile<T>`），再回落到
+ * 裸值（0.1.5/0.1.2 时代 Config 里的普通字段），最后用 schema 默认值。
+ *
+ * 这样上层（index.ts / client）拿到的永远是裸值，不必关心当前内核代次。
+ */
+function readVolatile<T>(value: unknown, fallback: T): T {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === 'object' && typeof (value as { get?: unknown }).get === 'function') {
+    const inner = (value as { get: () => unknown }).get();
+    return (inner === undefined || inner === null ? fallback : inner) as T;
+  }
+  return value as T;
+}
+
+/** 拍平后的配置：策略字段 + 可调字段，全部是裸值。 */
+export type FlatConfig = Config & {
+  llmEnabled: boolean;
+  historyEnabled: boolean;
+  historyCrossSession: boolean;
+  historyMaxEntries: number;
+  historyMinChars: number;
+  wordAccept: boolean;
+  acceptKey: string;
+};
+
+/**
+ * 把插件配置拍平成「策略 + 可调」的裸值视图。0.1.7 的可调项是引用，其余代码
+ * （effective()、client 渲染、热度快照上限）都按裸值读，不必知道代次差异。
+ */
+export function flattenConfig(config: ResolvedPluginConfig): FlatConfig {
+  return {
+    ...config,
+    llmEnabled: readVolatile(config.llmEnabled, true),
+    acceptKey: readVolatile(config.acceptKey, 'Tab'),
+    historyEnabled: readVolatile(config.historyEnabled, true),
+    historyCrossSession: readVolatile(config.historyCrossSession, false),
+    historyMaxEntries: readVolatile(config.historyMaxEntries, 50),
+    historyMinChars: readVolatile(config.historyMinChars, 1),
+    wordAccept: readVolatile(config.wordAccept, true),
+  } as FlatConfig;
+}
+
 /** 校验并返回不可变配置。 */
 export function resolveConfig(config: Config): Config {
   if (config === null || typeof config !== 'object') {
     throw new Error('dsh-suggest-ghost: configuration is required');
   }
-  const value = config as unknown as Record<string, unknown>;
+  const raw = config as unknown as Record<string, unknown>;
+  // 0.1.7 的 Loader 把 volatile 字段解析成 cosmokit 引用（`{ get() }`），
+  // 而不是裸值；0.1.5/0.1.2 是裸值。校验一律针对**裸值**，否则 `acceptKey`
+  // 这类字符串字段会因为拿到对象而误判成「非法」。`readVolatile` 同时认两种形态。
+  const value: Record<string, unknown> = {
+    ...raw,
+    provider: readVolatile(raw.provider, undefined),
+    model: readVolatile(raw.model, undefined),
+    acceptKey: readVolatile(raw.acceptKey, undefined),
+    llmEnabled: readVolatile(raw.llmEnabled, undefined),
+  };
   const int = (name: string): number => {
-    const n = value[name];
+    const n = readVolatile<unknown>(value[name], undefined);
     if (typeof n !== 'number' || !Number.isInteger(n) || n <= 0) {
       throw new Error(`dsh-suggest-ghost: ${name} must be a positive integer`);
     }
@@ -95,15 +169,21 @@ export function resolveConfig(config: Config): Config {
   if (typeof value.timeoutMs === 'number' && value.timeoutMs > MAX_TIMER_DELAY_MS) {
     throw new Error(`dsh-suggest-ghost: timeoutMs must not exceed ${MAX_TIMER_DELAY_MS}`);
   }
-  const hasProvider = value.provider !== undefined;
-  const hasModel = value.model !== undefined;
-  if (hasProvider !== hasModel) {
+  // provider/model 允许留空 = 继承会话最近一次请求的路由（见 routeOf）。
+  // 因此这里只校验**成对**：两者要么都空（继承），要么都非空（覆盖）；
+  // 一个空一个非空才是配置错误。空串本身合法，不能当成「非法覆盖」拒绝。
+  const provider = value.provider;
+  const model = value.model;
+  if ((provider === undefined) !== (model === undefined)) {
     throw new Error('dsh-suggest-ghost: provider and model must be supplied together');
   }
-  if (hasProvider
-    && (typeof value.provider !== 'string' || value.provider.length === 0
-      || typeof value.model !== 'string' || value.model.length === 0)) {
-    throw new Error('dsh-suggest-ghost: provider and model overrides must be non-empty strings');
+  if (provider !== undefined && (typeof provider !== 'string' || typeof model !== 'string')) {
+    throw new Error('dsh-suggest-ghost: provider and model must be strings');
+  }
+  const providerGiven = typeof provider === 'string' && provider.length > 0;
+  const modelGiven = typeof model === 'string' && model.length > 0;
+  if (providerGiven !== modelGiven) {
+    throw new Error('dsh-suggest-ghost: provider and model must be supplied together');
   }
   if (value.acceptKey !== undefined
     && (typeof value.acceptKey !== 'string' || value.acceptKey.trim().length === 0)) {
@@ -217,7 +297,11 @@ function routeOf(
   session: Session,
   config: Config,
 ): { readonly provider: string; readonly model: string } {
-  if (config.provider !== undefined && config.model !== undefined) {
+  // 空串是「未配置」而非「显式覆盖」：schema 用 `.default('')` 表达「继承」
+  // （volatile 表单不接受必填项，留空即继承）。所以这里必须连同长度一起判断，
+  // 只看 `!== undefined` 会把 `''` 当成覆盖，解析出空路由并让插件启动失败。
+  if (config.provider !== undefined && config.provider.length > 0
+    && config.model !== undefined && config.model.length > 0) {
     return { provider: config.provider, model: config.model };
   }
   const route = session.requestHeader()?.config;
@@ -293,9 +377,14 @@ export async function generateSuggestion(
   const language = suggestionLanguage(transcript.pairs);
   const system = systemPrompt(config.maxSuggestionChars, language);
   const framed = frameTranscript(transcript.pairs);
+  // source：0.1.7 删除了 `plugin` kind（0.1.5 有、0.1.7 无），且 0.1.7 新增的
+  // `schedule` kind 在 0.1.5 不存在 —— 两代**无交集**，故取两代都有的 `user`。
+  //
+  // 这里 source 只用于构造一次性 LLM 请求载荷（见下方注释：请求细节不落会话日志），
+  // 不参与持久化与投影，因此 `user` 的语义差异不影响任何读者。
   const messages: Message[] = [createUserMessage({
     content: [{ type: 'text', text: framed }],
-    source: { kind: 'plugin', plugin: 'dsh-suggest-ghost' },
+    source: { kind: 'user' },
   })];
   // 请求细节（turn/seq/provider/model/maxTokens）不再写入会话日志：
   // rc.7 禁止未标记 ignorable 的自定义事件落日志，且建议经 settings `_push` 实时送达 client。

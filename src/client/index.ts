@@ -15,6 +15,15 @@
  * 所需服务通过模块级 `inject` 数组声明（fiber 激活门控），apply 内直接用
  * `ctx.get(name)` 读取；设置卡片依赖的 `slots` / `settingsScope` 为可选服务，
  * 用 `ctx.get()` 可选读取，缺失时不注册卡片、不阻塞幽灵逻辑。
+ *
+ * 0.1.7 兼容性：`settingsScope` 服务已随 settings.yaml 体系移除。取数改为
+ * `ctx.get('remote')?.settings.describe()`，写入改为 `mutate(ns, ops)`，变更通知
+ * 订阅内核转发的 `settings/document-updated` 事件（**无轮询**）；设置卡片所需的
+ * scope 最小面由本文件的 `remoteSettingsScope()` 适配器提供，卡片本体无需改动。
+ *
+ * **注意：remote 一律经 `ctx.get('remote')` 取，绝不读 `ctx.remote` 属性**，且
+ * `inject` 必须同时声明 `remote.settings`（cordis reflect 把嵌套属性读拼成
+ * `remote.settings` 子服务名）。详见下方 `remoteOf()`。
  * @module dsh-suggest-ghost/client
  */
 
@@ -25,6 +34,7 @@ import { commonPrefixLength, extractHistory, historySuggestion, normalizeForMatc
 import { nextAcceptChunk } from './chunk.ts';
 import { keyCodeOf } from './keyspec.ts';
 import { SuggestGhostCard } from './settings-card.tsx';
+import type { PluginSettingsScope } from './settings-scope.ts';
 import type { LocaleFaceLike } from './useGhostT.ts';
 
 /**
@@ -37,6 +47,93 @@ interface ObservableSnapshot<T> {
   subscribe(listener: () => void): () => void;
 }
 
+/**
+ * 宿主会话列表快照的最小结构视图（只用到 `byId`）。
+ *
+ * 0.2.x 的 `SessionListState` 顶层只有 `ids` / `byId` / `phase` /
+ * `projectionsBySession`，**没有 `current`**：当前会话建模为被 `mainView` 源
+ * 保有的那一行，host 的 workspace / layout / session 包都用该判据推导 main。
+ * `retainedBy` 只记正数计数，无引用的源键缺席，故必须 `?? 0`。
+ */
+interface SessionListSnapshotLike {
+  byId: Record<string, { id: string; retainedBy?: Record<string, number | undefined> }>;
+}
+
+/** 当前（主视图）会话 id；没有会话打开时为 undefined。 */
+const currentSessionIdOf = (snapshot: SessionListSnapshotLike): string | undefined =>
+  Object.values(snapshot.byId).find((row) => (row.retainedBy?.mainView ?? 0) > 0)?.id;
+
+/**
+ * 宿主 `ctx.remote` 的最小结构视图（只用到 `settings.describe` / `settings.mutate`）。
+ *
+ * 不从 `@deepseek-ai/dsh-client-runtime` 导入：0.1.1 内核特有、0.1.2 已拆走，
+ * 0.1.7 换成了 `dsh-api-remotes`。声明本地最小面，让 client 端保持零内核导入
+ * （lib/client.js 实测不 import 任何内核包），跨代无关。
+ */
+interface RemoteLike {
+  /**
+   * 订阅内核转发到 client 的宿主事件（返回 disposer）。
+   * `settings/document-updated` 在 dsh-api-remotes 的转发白名单内（mode: 'emit'），
+   * 内核设置页即用它驱动 `SettingsDescribeMirror` 重载。0.1.7+ 可用；更早的代次
+   * 没有该服务，故按可选读取（旧宿主退化为首读一次 + 渲染兜底）。
+   */
+  $on?(event: string, listener: (...args: unknown[]) => void): () => void;
+  settings?: {
+    /**
+     * 读设置文档。返回的是 **RPC 信封** `{ ok, value }`，真正的
+     * `{ writable, hasDocument, namespaces }` 在 `value` 里——不是顶层。
+     */
+    describe(options?: { redactSecrets?: boolean }): Promise<unknown>;
+    /**
+     * 写设置。**三个参数都必填**——少传 `expectedRevision` 会被 client api 拒绝：
+     * `settings/mutate expected 3 argument(s), got 2`（该参数是乐观并发控制，
+     * 传当前 revision；不匹配则整批失败，避免覆盖他人改动）。
+     */
+    mutate(ns: string, ops: readonly SettingsPathOpLike[], expectedRevision: number): Promise<unknown>;
+  };
+}
+
+/** `remote.settings.mutate` 的路径操作（与内核 `SettingsPathOp` 同构）。 */
+type SettingsPathOpLike =
+  | { op: 'set'; path: readonly string[]; value: unknown }
+  | { op: 'unset'; path: readonly string[] };
+
+/** 设置文档：一个命名空间条目（`writable` 是文档级字段，不在条目上）。 */
+interface SettingsDoc {
+  writable?: boolean;
+  hasDocument?: boolean;
+  namespaces?: Array<{ ns: string; value?: unknown; revision?: number }>;
+}
+
+/**
+ * 解包 `describe()` 的返回值，**不假设层数**。
+ *
+ * 实测踩过的坑：typert 的 RPC 响应形如
+ * `{ type:'server-response', result:{ ok:true, value:{ writable, namespaces } } }`，
+ * 而 client 侧的 `remote.settings.describe()` 到底返回「已解一层的文档」还是
+ * 「完整 RPC 信封」取决于调用侧是否已被 transport 解包——两种都见过。按固定
+ * 层数写（`described.value.namespaces` 或 `described.result.value.namespaces`）
+ * 都会在另一种形状下恒为 undefined，且**静默失败**：入口直接 return，`settings`
+ * 永远停在初值，表现为「插件加载了但幽灵文本从不出���」。
+ *
+ * 故这里逐层下探到真正带 `namespaces` 的那一层为止，两种形状都能用。
+ */
+function unwrapSettingsDoc(response: unknown): SettingsDoc | undefined {
+  let node: unknown = response;
+  // 上限 4 层：足以覆盖 {doc} / {value:doc} / {result:{value:doc}} 三种形态，
+  // 又不至于在异常结构里自旋。
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof node !== 'object' || node === null) return undefined;
+    const record = node as Record<string, unknown>;
+    if (Array.isArray(record.namespaces)) return record as SettingsDoc;
+    if (record.ok === true) { node = record.value; continue; } // RPC 信封（成功）
+    if ('result' in record) { node = record.result; continue; } // server-response
+    if ('value' in record) { node = record.value; continue; }
+    return undefined;
+  }
+  return undefined;
+}
+
 /** 投影键（与 host 端 PROJECTION_KEY 一致）。 */
 const PROJECTION_KEY = 'suggestGhost';
 /** 幽灵文本的 DOM 标记，用于定位/清理。 */
@@ -45,6 +142,16 @@ const OVERLAY_ID = 'dsh-suggest-ghost-overlay';
 const DEFAULT_ACCEPT_KEY = 'Tab';
 /** settings 命名空间（与 host 端一致）。 */
 const SETTINGS_NAMESPACE = 'suggest-ghost';
+/**
+ * `settings.section` 的 section id（导航标识）。
+ *
+ * 必须用**宿主没有的 id**：新 id 会在设置导航里并排新增一页；复用宿主已用的
+ * id（如 `general` / `models` / `plugins`）会顶掉那一页。取 `suggest-ghost`
+ * 与本插件命名空间一致，便于排查。
+ */
+const SETTINGS_SECTION_ID = 'suggest-ghost';
+/** 设置页导航文案（跟随宿主界面语言；无 locale 服务时回退中文）。 */
+const SECTION_LABELS = { zh: '输入预测', en: 'Input prediction' } as const;
 /** 未获应答的 pull 最多重试次数（host 可能回一份不含历史的载荷；上限防自旋）。 */
 const PULL_MAX_ATTEMPTS = 5;
 /** pull 重试的基础退避（毫秒），第 n 次退避 = 基础值 × 2^n。 */
@@ -54,10 +161,25 @@ const PULL_RETRY_BASE_MS = 200;
 /** 插件名（与 manifest id 一致）。 */
 const name = 'dsh-suggest-ghost';
 /** 所需服务：会话 face + 输入机 face（幽灵必需，rc.7 fiber 激活门控）。
- * settingsScope / slots / locale 为可选服务，在 apply 内用 ctx.get 可选读取，
- * 不在此声明——cordis 的 fiber 门控会在声明的服务缺失时把整个插件 park，
- * 以免其缺失时连带 park 幽灵逻辑（locale 缺失只应让卡片回退中文）。 */
-const inject = ['conversation', 'sessions'];
+ *
+ * `remote` 与 `remote.settings` **都必须声明**，且 `remote.settings` 才是关键：
+ * 0.1.7 的 cordis reflect 在读嵌套属性时把键拼成 `` `${associate}.${prop}` ``（见
+ * cordis `lib/index.js` 的 `internal/get` 路径），也就是 `ctx.get('remote').settings`
+ * 实际查询的是名为 `remote.settings` 的子服务。未声明就读会抛
+ * `cannot get property "remote.settings" without inject`，整个 client fiber 失败，
+ * Web 启动报 `dsh-suggest-ghost: failed` 并挡住界面。内核
+ * `@deepseek-ai/dsh-client-ui-settings` 的 provider 用的正是
+ * `inject = ["remote", "remote.settings"]`，本插件照同一写法。
+ *
+ * `slots` 现在**必须**声明：设置页以 `settings.section` 槽位注册，而 section 的
+ * 宿主（`@deepseek-ai/dsh-client-ui-settings-plugins` 等）自己就是
+ * `inject = ["slots", "locale"]` —— `slots` 是它们提供的服务，不声明就读不到。
+ * `locale` 同样需要（注册本插件的字典 + 解析 nav 文案）。二者都由
+ * `package.json` 的 `dsh.client.inject` 声明了对应宿主模块，故实际可达。
+ * 缺失时的后果已由「不声明 → `ctx.get('slots')` 为 undefined → 跳过设置页」
+ * 退化为「声明 → 宿主若不提供则 park 整个插件」，二者不可兼得；因为
+ * `dsh-client-ui-settings` 已是 manifest 依赖，park 风险为零，故选择声明。 */
+const inject = ['conversation', 'sessions', 'remote', 'remote.settings', 'slots', 'locale'];
 
 /** composer 的双代选择器：≤0.1.1 是 textarea，0.1.2 起是 Lexical contenteditable
  * （`data-composer-input` 标记，属 data-input-scroll 容器）。 */
@@ -116,13 +238,59 @@ type GhostContent =
   | { kind: 'llm'; text: string; acceptKey: string }
   | { kind: 'history'; prefix: string; suffix: string; full: string };
 
-/** 幽灵文本 overlay 管理器：在输入框（textarea / Lexical contenteditable）上
- * 创建/更新/移除灰色覆盖层。 */
+/**
+ * 幽灵文本 overlay 管理器：在输入框（textarea / Lexical contenteditable）上
+ * 创建/更新/移除灰色覆盖层。
+ *
+ * ## 定位契约（实测结论，勿凭直觉改符号）
+ *
+ * 宿主 composer 的 DOM 是**两层**，滚动发生在编辑器**外面**：
+ *
+ * ```
+ * div[data-input-scroll]   .scroll  overflow-y:auto; max-height:336px  ← 滚动容器
+ * └─ div .grow             position:relative                            ← offsetParent
+ *    ├─ div[data-composer-input]                                        ← 编辑器，overflow:visible，scrollTop 恒 0
+ *    └─ div[data-composer-placeholder]
+ * ```
+ *
+ * overlay 被追加到 `.grow` 内，而 `.grow` 是滚动容器的**子节点**——也就是说
+ * overlay 处在「被滚动的内容」坐标系中，滚动时与正文**一起**位移。因此
+ * **不需要、也不能做滚动补偿**（这是最容易写错的一处）：
+ *
+ * 实测（`.grow` 上放探针，`max-height:336px`，草稿 30 行）：
+ * | scrollTop | 正文 top | `offsetTop+pad` 公式 | 再减 scrollTop |
+ * |---|---|---|---|
+ * | 0   | 304 | 304 ✅ | 304 ✅ |
+ * | 120 | 184 | 184 ✅ | 64 ❌  |
+ * | 384 | -80 | -80 ✅ | -464 ❌ |
+ *
+ * 结论：**只用 `offsetTop + padding`**（`offsetTop` 相对 offsetParent，与滚动
+ * 无关）。幽灵已随内容滚动，再减一次是**双重补偿**，会产生 `-scrollTop` 的漂移
+ * ——草稿越长越明显，正是「滚动后幽灵压在别的文字上」的成因。
+ * 回归测试见 `scripts/ghost-geom-smoke.mjs`。
+ *
+ * ## 重叠防护
+ *
+ * 显示前做一次几何自检（见 {@link verify}）：幽灵若未落在编辑器内容原点上
+ * （宿主 DOM 结构变化导致坐标系假设失效），宁可不显示，也不糊在正文上。
+ */
 class GhostOverlay {
   private readonly el: HTMLDivElement;
   private composer: HTMLElement | null = null;
+  /**
+   * 滚动容器（`[data-input-scroll]`）。
+   *
+   * 定位**不用**它（overlay 随内容自动滚动），保留它只为了挂 `scroll` 监听：
+   * 滚动会使内容相对视口位移，需要触发一次重对齐与自检。
+   */
+  private scroller: HTMLElement | null = null;
   private readonly onScroll: () => void;
+  private readonly onResize: () => void;
   private readonly styleTag: HTMLStyleElement;
+  /** 尺寸变化观察者：composer 自动增高/附件行出现/字体回流都会改变内容起点。 */
+  private resizeObserver: ResizeObserver | null = null;
+  /** 正在显示的内容（供 ResizeObserver 回调重对齐后重新自检）。 */
+  private current: GhostContent | null = null;
 
   constructor() {
     this.el = document.createElement('div');
@@ -141,23 +309,51 @@ class GhostOverlay {
       // 提示这是「可采纳的建议」而非占位文案；同色晕不改变色相、暗/亮主题通用。
       'text-shadow:0 0 1px var(--dsw-alias-label-caption, #9aa0a6), 0 0 8px var(--dsw-alias-label-caption, #9aa0a6)',
       'z-index:1',
-      'visibility:hidden',
+      // 初值：不绘制。用 display（而非旧版的 visibility）——见下方 show()/hide()
+      // 与类注释，display 让节点彻底退出渲染，避免任何过渡期双绘。
+      'display:none',
     ].join(';');
-    this.onScroll = () => this.align();
+    this.onScroll = () => this.alignAndVerify();
+    this.onResize = () => this.alignAndVerify();
     // 幽灵激活时隐藏原生 placeholder（二者同位置，避免重叠）。
-    // 幽灵显示期间隐藏占位文案（二者同位置，避免重叠）。关键：状态标记打在
-    // **我们自己的 overlay 节点**上（data-shown），经 body:has() 关联占位元素
-    // ——React/Lexical 重渲染会剥掉编辑器上的外来类（实测发生过），而 overlay
-    // 是插件私有节点不受影响，且与 DOM 顺序、textarea/contenteditable 形态
-    // 无关。规则覆盖两代 composer：
+    // 状态标记打在**我们自己的 overlay 节点**上（data-shown），经 body:has() 关联
+    // 占位元素——React/Lexical 重渲染会剥掉编辑器上的外来类（实测发生过），而
+    // overlay 是插件私有节点不受影响，且与 DOM 顺序、textarea/contenteditable
+    // 形态无关。规则覆盖两代 composer：
     //  - textarea：原生 ::placeholder 伪元素；
-    //  - contenteditable（0.1.2 Lexical）：placeholder 兄弟节点带
-    //    `data-composer-placeholder` 稳定属性钩子。
+    //  - contenteditable（0.1.2 Lexical）：placeholder 是 `.grow` 内的兄弟节点，
+    //    带 `data-composer-placeholder` 稳定属性钩子。
+    //
+    // 实测要点：宿主的 placeholder 节点**仅在 `showPlaceholder` 为真时渲染**
+    // （草稿非空时不渲染，实测 `querySelectorAll` 计数为 0），所以选择器在
+    // 「草稿非空」这一历史补全场景下本就无处命中；真正需要它的是 LLM 建议场景
+    // （草稿为空、占位文案在场）。因此三条规则都给上，任一条命中即可：
+    //
+    // **用 display:none / visibility:hidden，而不是旧版的 opacity:0**：opacity
+    // 虽不脱离布局、但仍是绘制的一部分，且过渡期里占位与幽灵会同帧可见。旧实现
+    // 只在 `[data-composer-placeholder]` 上写 opacity:0，一旦该节点尚未挂载或
+    // 结构变化，规则就静默空转——这正是「幽灵叠在占位文案上」的第二个来源。
+    // `[data-composer-input]` 的 `data-placeholder` 属性是宿主渲染即带的（与本
+    // 插件无关），作为兜底钩子，不依赖节点的增删时机。
     this.styleTag = document.createElement('style');
     this.styleTag.dataset.pluginCss = 'dsh-suggest-ghost';
     this.styleTag.textContent = [
-      'body:has(#dsh-suggest-ghost-overlay[data-shown="1"]) [data-composer-placeholder]{opacity:0}',
-      'body:has(#dsh-suggest-ghost-overlay[data-shown="1"]) textarea::placeholder{opacity:0}',
+      // ── 让位规则：幽灵**正在显示**时，placeholder 必须让位 ──
+      //
+      // 判据同时要求 `data-shown="1"` **且** overlay 未被 `display:none` 隐藏。
+      // 只写 `data-shown` 不够：`hide()` / 自检失败路径会把 display 置回 none，
+      // 若此时仍据 `data-shown` 或「节点存在」去隐藏 placeholder，就会出现
+      // 「幽灵没显示、占位文案也没了」——草稿清空后输入框一片空白（实测过）。
+      // 反过来只据「节点存在」同样错：节点在首次 show 后就常驻 DOM 不移除。
+      //
+      // `:not([style*="display: none"])` 读的是内联 style（本插件唯一写 display
+      // 的地方），故与自身写入的状态严格同步，无属性时序竞态。
+      'body:has(#dsh-suggest-ghost-overlay[data-shown="1"]:not([style*="display: none"])) [data-composer-placeholder]{display:none!important}',
+      'body:has(#dsh-suggest-ghost-overlay[data-shown="1"]:not([style*="display: none"])) textarea::placeholder{visibility:hidden!important}',
+      // 兜底：编辑器自带 data-placeholder 属性的伪元素（部分宿主形态）以及
+      // 依赖 `[data-placeholder]` 出文案的 ::before/::after 实现。
+      'body:has(#dsh-suggest-ghost-overlay[data-shown="1"]:not([style*="display: none"])) [data-composer-input][data-placeholder]::before{content:none!important}',
+      'body:has(#dsh-suggest-ghost-overlay[data-shown="1"]:not([style*="display: none"])) [data-composer-input][data-placeholder]::after{content:none!important}',
     ].join('\n');
     if (typeof document !== 'undefined') document.head.appendChild(this.styleTag);
   }
@@ -172,14 +368,25 @@ class GhostOverlay {
     if (this.composer === composer) return;
     this.detach();
     this.composer = composer;
+    // 滚动容器：只为挂 scroll 监听（定位不用它，见类注释的实测表格）。
+    this.scroller = composer.closest<HTMLElement>('[data-input-scroll]');
+    // 挂载点：`.grow` 是宿主显式 `position:relative` 的 offsetParent，且位于滚动
+    // 容器内部——overlay 放这里才能随内容一起滚动。**不再改写宿主样式**（旧实现
+    // 在 static 时强写 relative，会污染宿主布局，且对已经是 relative 的 .grow
+    // 毫无作用）。
     const parent = composer.parentElement;
-    if (parent !== null && getComputedStyle(parent).position === 'static') {
-      parent.style.position = 'relative';
-    }
-    composer.addEventListener('scroll', this.onScroll, { passive: true });
-    window.addEventListener('resize', this.onScroll);
     if (parent !== null) parent.appendChild(this.el);
-    this.align();
+    composer.addEventListener('scroll', this.onScroll, { passive: true });
+    this.scroller?.addEventListener('scroll', this.onScroll, { passive: true });
+    window.addEventListener('resize', this.onResize);
+    // 尺寸变化（自动增高、附件行、字体回流）也会移动内容起点，必须重对齐。
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(this.onResize);
+      this.resizeObserver.observe(composer);
+      if (this.scroller !== null) this.resizeObserver.observe(this.scroller);
+      if (parent !== null) this.resizeObserver.observe(parent);
+    }
+    this.alignAndVerify();
   }
 
   private detach(): void {
@@ -187,23 +394,55 @@ class GhostOverlay {
       this.composer.removeEventListener('scroll', this.onScroll);
       this.composer = null;
     }
+    if (this.scroller !== null) {
+      this.scroller.removeEventListener('scroll', this.onScroll);
+      this.scroller = null;
+    }
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.current = null;
     this.el.dataset.shown = '0';
-    window.removeEventListener('resize', this.onScroll);
+    this.el.style.display = 'none';
+    window.removeEventListener('resize', this.onResize);
     this.el.remove();
   }
 
-  /** 对齐 overlay 到输入框内容区（含 padding 起点、跟随滚动）。 */
+  /**
+   * 对齐 overlay 到输入框内容区（含 padding 起点）。
+   *
+   * ## 为什么**不做**滚动补偿（实测结论，勿回退）
+   *
+   * overlay 挂在 `.grow` 上，而 `.grow` 是滚动容器 `[data-input-scroll]` 的**子
+   * 节点**——即 overlay 位于「被滚动的内容」坐标系里。滚动容器滚动时 `.grow`
+   * 整体一起位移（实测 `scrollTop=120` 时 `.grow` 的 rect.top 同步上移 120），
+   * 因此 overlay **自动跟随内容滚动，无需任何 scrollTop 项**。
+   *
+   * 实测反证（`.grow` 上的探针元素，`scrollTop=120`）：
+   *  - `rect 差 - scrollTop` → 幽灵落在 `64`，正文在 `184`：**漂移 `-scrollTop`**；
+   *  - `rect 差 + scrollTop` → 幽灵恒定不动，漂移 `+scrollTop`；
+   *  - `offsetTop + paddingTop`（**本实现**）→ 与正文逐像素重合（5 个滚动位置全对）。
+   *
+   * 另注：rect 差在这里恒为 0（`.grow` 与编辑器一起移动、同点），用它会把真实的
+   * 内容偏移丢掉；`offsetTop/offsetLeft` 相对 `offsetParent`，与滚动无关，才是
+   * 「内容坐标系」里的正确坐标。
+   */
   private align(): void {
     const ta = this.composer;
     if (ta === null) return;
     const style = getComputedStyle(ta);
     const padLeft = parseFloat(style.paddingLeft) || 0;
     const padTop = parseFloat(style.paddingTop) || 0;
+    const padRight = parseFloat(style.paddingRight) || 0;
     const borderLeft = parseFloat(style.borderLeftWidth) || 0;
     const borderTop = parseFloat(style.borderTopWidth) || 0;
+    // 内容起点 = 编辑器在 offsetParent（.grow）内的偏移 + border + padding。
+    // offsetTop/offsetLeft 与滚动无关，正是「内容坐标系」里的正确坐标。
     this.el.style.left = `${ta.offsetLeft + borderLeft + padLeft}px`;
-    this.el.style.top = `${ta.offsetTop + borderTop + padTop - ta.scrollTop}px`;
-    this.el.style.width = `${ta.clientWidth - padLeft - (parseFloat(style.paddingRight) || 0)}px`;
+    this.el.style.top = `${ta.offsetTop + borderTop + padTop}px`;
+    // 宽度：编辑器内容宽 = clientWidth - 左右 padding（border-box 下 clientWidth
+    // 已含 padding、不含 border）。
+    const width = ta.clientWidth - padLeft - padRight;
+    this.el.style.width = `${width > 0 ? width : ta.clientWidth}px`;
     // 继承输入区字体与行高，保证幽灵文本视觉一致。
     this.el.style.fontFamily = style.fontFamily;
     this.el.style.fontSize = style.fontSize;
@@ -211,6 +450,83 @@ class GhostOverlay {
     this.el.style.fontWeight = style.fontWeight;
     this.el.style.letterSpacing = style.letterSpacing;
     this.el.style.boxSizing = 'border-box';
+  }
+
+  /**
+   * 对齐后做几何自检：定位明显失真时宁可不显示，也绝不糊在正文上。
+   *
+   * ## 判据（依据实测，不是推测）
+   *
+   * overlay 是 `.grow` 的子节点，随内容一起滚动——所以「幽灵跑到滚动视口外」是
+   * **正常且正确**的（正文也一起滚出去了，被滚动容器裁掉）。因此**不能**用
+   * 「必须落在滚动视口内」当判据：实测 `scrollTop=384` 时幽灵与正文同在
+   * `top=-80`，两者都被裁掉，这是正确的。
+   *
+   * 真正要防的是**定位失真**：overlay 没有落在编辑器内容原点上（例如宿主要
+   * 在 `.grow` 与编辑器之间插入带 padding/border 的新层，或 `.grow` 不再是
+   * offsetParent）。此时幽灵会浮在别的内容上——就是用户报告的重叠。
+   *
+   * 判据：幽灵左上角与「编辑器在 offsetParent 内的内容原点」之差必须在一个
+   * 行高量级内。偏差超过一行，说明坐标系假设已被宿主破坏，放弃显示。
+   */
+  private verify(): boolean {
+    const ta = this.composer;
+    if (ta === null) return false;
+    const host = this.el.offsetParent;
+    if (!(host instanceof HTMLElement)) return false;
+    // 调用方已保证此刻元素是 `display:block`（见 alignAndVerify），此处 rect 可信。
+    const ghostRect = this.el.getBoundingClientRect();
+    // 期望位置：编辑器内容原点在视口中的坐标。
+    const expectedTop = ta.getBoundingClientRect().top
+      + (parseFloat(getComputedStyle(ta).paddingTop) || 0);
+    // 实际位置与期望位置之差；一行高度（约 24px）以内的偏差无害，超过即失真。
+    const drift = Math.abs(ghostRect.top - expectedTop);
+    const lineHeight = parseFloat(getComputedStyle(ta).lineHeight);
+    const tolerance = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 24;
+    if (drift > tolerance) return false;
+    // 水平方向同理：允许一个字宽量级的偏差。
+    const expectedLeft = ta.getBoundingClientRect().left
+      + (parseFloat(getComputedStyle(ta).paddingLeft) || 0);
+    if (Math.abs(ghostRect.left - expectedLeft) > tolerance) return false;
+    // host 必须仍包含编辑器（否则 overlay 挂在了不相干的层上）。
+    return host.contains(ta) || host === ta.parentElement;
+  }
+
+  /**
+   * 对齐 + 自检；自检失败则隐藏（保持 current 以便下次事件重试）。
+   *
+   * ## 两条顺序约束（都踩过坑，勿调换）
+   *
+   * 1. **必须先 `display:block` 再测量**：`getBoundingClientRect()` 对
+   *    `display:none` 的元素恒返回全 0，先测量会把每次首帧都判为「空矩形 →
+   *    不可显示」，`display` 永远停在 `none`——表现为幽灵彻底不出现。
+   *
+   * 2. **必须在显示之前就 `data-shown="1"`**：placeholder 的隐藏规则
+   *    （`body:has(#…[data-shown="1"]) [data-composer-placeholder]{display:none}`）
+   *    挂在 `data-shown` 上。若先 `display:block` 再标 `data-shown`，中间就存在
+   *    一个「幽灵已可见、placeholder 还没隐藏」的窗口——两者同原点，直接重叠
+   *    （实测：该窗口内 placeholder 的 computed display 仍是 block）。
+   *
+   * 注意两者是**不同元素上的两个开关**，互不冲突：
+   *  - `data-shown` 打在 overlay 自身（控制 placeholder 是否让位）；
+   *  - `display` 打在 overlay 自身（控制幽灵是否绘制）。
+   * 因此正确顺序是：**先标 `data-shown` 让位 → 再 `display:block` → 测量自检
+   * → 不合格则把两者一起回退**。
+   */
+  private alignAndVerify(): void {
+    if (this.current === null) return;
+    this.align();
+    // ① 先让 placeholder 让位（此时幽灵尚未绘制，不会出现双绘窗口）。
+    this.el.dataset.shown = '1';
+    // ② 再让它参与布局，否则下一步的 rect 测量恒为 0。
+    this.el.style.display = 'block';
+    if (!this.verify()) {
+      // ③ 自检不合格：两个开关一起回退，避免「幽灵不画但 placeholder 已让位」
+      //    造成占位文案凭空消失。
+      this.el.style.display = 'none';
+      this.el.dataset.shown = '0';
+      return;
+    }
   }
 
   /** 显示幽灵内容（对齐由滚动/尺寸事件持续维护）；隐藏 placeholder 避免重叠。 */
@@ -227,13 +543,14 @@ class GhostOverlay {
       suffix.textContent = content.suffix;
       this.el.append(prefix, suffix);
     }
-    this.el.style.visibility = 'visible';
-    this.el.dataset.shown = '1';
-    this.align();
+    this.current = content;
+    // 先按当前几何定位，再由自检决定是否真的绘制（防止第一帧就糊在正文上）。
+    this.alignAndVerify();
   }
 
   hide(): void {
-    this.el.style.visibility = 'hidden';
+    this.current = null;
+    this.el.style.display = 'none';
     this.el.textContent = '';
     this.el.dataset.shown = '0';
   }
@@ -245,8 +562,54 @@ class GhostOverlay {
 }
 
 /** 浏览器插件主体。 */
-function apply(ctx: Context): void {
+/**
+ * 取 `remote` 服务（读 `remote.settings` 用）。
+ *
+ * **必须走 `ctx.get('remote')`，不能读 `ctx.remote` 属性。** 0.1.7 的 client runner
+ * 用 `dynamicCordisContext` 把插件 ctx 换成严格门控 Proxy：任何非动词属性读取都走
+ * `readService(prop, true)`，未在插件 `inject` 里声明就抛
+ * `cannot get property "remote" without inject`，整个 client fiber 失败。
+ *
+ * 且 `inject` 里**必须同时声明 `remote.settings`**：cordis reflect 读嵌套属性时把键
+ * 拼成 `remote.settings` 这个独立子服务名，未声明即抛
+ * `cannot get property "remote.settings" without inject`（这正是本插件此前
+ * `dsh-suggest-ghost: failed` 的真实原因）。
+ */
+const remoteOf = (ctx: Context): RemoteLike | undefined => ctx.get('remote') as RemoteLike | undefined;
+
+/**
+ * 设置 scope 的快照**信封**（卡片按此形状读取：`snap.status` / `snap.value` /
+ * `snap.writable`）。见 `remoteSettingsScope()` 的说明。
+ */
+export interface ScopeSnapshot {
+  /** `loading` = 尚未从 host 取到；`ready` = 已取到；`unavailable` = 命名空间缺失。 */
+  readonly status: 'loading' | 'ready' | 'unavailable';
+  /** 命名空间当前解析值（含 `_push` / `_ops` 两个 JSON 字段）。 */
+  readonly value: Record<string, unknown>;
+  /** host 是否允许写入（旧宿主缺省视为可写）。 */
+  readonly writable: boolean;
+}
+
+/**
+ * 设置页的导航文案。
+ *
+ * 宿主每次投影 `settings.section` 的 `label` 时都会重读这个 thunk，所以语言
+ * 切换后无需重新注册 section。locale 服务缺失（旧宿主组合）时回退中文，与
+ * useGhostT 的降级行为一致。
+ * @param locale - 宿主 locale 服务；可为 undefined。
+ */
+const sectionLabel = (locale: LocaleFaceLike | undefined): string => {
+  const active = locale === undefined ? 'zh' : locale.getSnapshot().active;
+  return active === 'en' ? SECTION_LABELS.en : SECTION_LABELS.zh;
+};
+
+function applyInner(ctx: Context): void {
   // rc.7：所需核心服务已由 `inject` 声明，fiber 激活门控保证可用；ctx.get 可选读取。
+  applyBody(ctx);
+}
+
+/** applyInner 的主体（原函数体）。 */
+function applyBody(ctx: Context): void {
   const sessions = ctx.get('sessions');
   if (sessions === undefined) return;
   const overlay = new GhostOverlay();
@@ -300,7 +663,7 @@ function apply(ctx: Context): void {
 
   /** 解析当前会话绑定（会话切换时重建）。 */
   const resolve = (): void => {
-    const id = sessions.list.getSnapshot().current as string | undefined;
+    const id = currentSessionIdOf(sessions.list.getSnapshot());
     if (id === undefined) {
       bound = null;
       lastSessionId = undefined;
@@ -334,7 +697,7 @@ function apply(ctx: Context): void {
     // 0.1.2 会话快照只余 lifecycle 字段；本插件用到的仅剩 `running`。
     const snapshot = bound.session.getSnapshot() as { running: boolean };
     const draft = bound.input.state.getSnapshot().draft;
-    const currentId = sessions.list.getSnapshot().current as string | undefined;
+    const currentId = currentSessionIdOf(sessions.list.getSnapshot());
 
     // 模式 1：草稿非空 → 历史前缀补全（打分制：新近度为主、频次/热度为辅）。
     if (settings.historyEnabled && draft.trim() !== '') {
@@ -411,6 +774,25 @@ function apply(ctx: Context): void {
         ? cachedComposer
         : document.querySelector<HTMLElement>(COMPOSER_SELECTOR);
     if (composer === null) return; // 输入框尚未挂载，等待下次通知
+    // ── 非编辑器形态一律不出幽灵 ────────────────────────────────────────────
+    // 宿主在无工作区/会话不可写时会把 composer 换成「选择一个工作区开始」这类
+    // **触发器按钮**：源码里 `editor: workspaceTrigger ? null : editor`，编辑器
+    // 根本不挂载，而 placeholder 文案（"选择一个工作区开始"）是该控件**唯一的
+    // 可见文字**。COMPOSER_SELECTOR 只看 `[data-composer-input]` 属性、不看可编辑
+    // 性，所以裸查询会在这种形态上照样命中；若此时出幽灵，我的让位规则就会把那句
+    // 提示藏掉 → 输入框变成一块没有文字的空框，表现为「输入框消失了」。
+    // 复用事件路径已有的 `isComposerElement` 判据（textarea 或 isContentEditable），
+    // 两条路径对「什么算输入框」的定义必须一致，否则又会出现「事件侧不认、渲染侧
+    // 却挂」的错配。
+    if (!isComposerElement(composer)) {
+      // 已经显示中的要收掉，并把指纹清空，否则回到可编辑形态时会被
+      // 「key 未变化」早退挡住，幽灵再也不出现。
+      if (shown !== null) {
+        overlay.hide();
+        shown = null;
+      }
+      return;
+    }
     cachedComposer = composer;
     overlay.attach(composer);
     overlay.show(content);
@@ -421,8 +803,21 @@ function apply(ctx: Context): void {
   // 注意：必须放在 render 等函数定义之后，否则同步调用 applySettings 会触发
   // const 函数声明前的 TDZ（原 rc.6 版靠 ctx.inject 的异步延迟规避，rc.7 下
   // 需要显式保证顺序）。
-  /** settingsScope 写面（经 `_ops` 反向通道请求 host 推送历史环）。 */
-  let ghostPullScope: { set: (key: string, value: unknown) => void } | null = null;
+  /**
+   * `_ops` 反向通道的写面（经 `remote.settings.mutate` 请求 host 推送历史环）。
+   *
+   * 0.1.7 里 `settingsScope.set` 已随 settings.yaml 体系退役；改写 volatile
+   * 配置字段走 `remote.settings.mutate(ns, [{op:'set', path:['_ops'], value}])`。
+   * mutate 失败（后端未就绪/命名空间暂不可见）时返回 false，调用方按未送达处理。
+   */
+  const writeOps = (payload: string): Promise<boolean> => {
+    const svc = remoteOf(ctx)?.settings;
+    if (svc === undefined) return Promise.resolve(false);
+    return svc
+      .mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['_ops'], value: payload }])
+      .then(() => true)
+      .catch(() => false);
+  };
   let pullRev = 0;
   let lastPulledSessionId: string | undefined;
   /** 尚未确认收到应答的 pull（见 retryPendingPull）；null = 无待确认请求。 */
@@ -442,12 +837,11 @@ function apply(ctx: Context): void {
    * 请求（consumeOps 的遗留补跑），不会丢。
    */
   const pullHistory = (sessionId: string): void => {
-    if (ghostPullScope === null) return;
     if (sessionId === lastPulledSessionId) return;
     lastPulledSessionId = sessionId;
     pendingPull = { sessionId, attempts: 0 };
     pullRev += 1;
-    void ghostPullScope.set('_ops', JSON.stringify({ rev: pullRev, ops: [{ op: 'pull', sessionId }] }));
+    void writeOps(JSON.stringify({ rev: pullRev, ops: [{ op: 'pull', sessionId }] }));
     schedulePullRetry(); // 未被应答时按退避重试（见 retryPendingPull）
   };
 
@@ -459,7 +853,7 @@ function apply(ctx: Context): void {
    */
   const retryPendingPull = (): void => {
     const pending = pendingPull;
-    if (pending === null || ghostPullScope === null) return;
+    if (pending === null) return;
     // 只有当前仍绑定该会话时才值得重试（切走后由新会话的 pull 接管）。
     if (lastSessionId !== pending.sessionId) {
       pendingPull = null;
@@ -475,7 +869,7 @@ function apply(ctx: Context): void {
     }
     pending.attempts += 1;
     pullRev += 1;
-    void ghostPullScope.set('_ops', JSON.stringify({ rev: pullRev, ops: [{ op: 'pull', sessionId: pending.sessionId }] }));
+    void writeOps(JSON.stringify({ rev: pullRev, ops: [{ op: 'pull', sessionId: pending.sessionId }] }));
     schedulePullRetry();
   };
 
@@ -488,53 +882,92 @@ function apply(ctx: Context): void {
       retryPendingPull();
     }, delay);
   };
-  const settingsScope = ctx.get('settingsScope');
-  if (settingsScope !== undefined) {
-    const scope = settingsScope.bind({ namespace: SETTINGS_NAMESPACE });
+  /**
+   * 读取本插件的 settings 命名空间并订阅变更。
+   *
+   * 0.1.7 变更：`settingsScope` 服务已从内核移除（随 settings.yaml 体系一起
+   * 退役），本插件的命名空间改由 `ctx.remote.settings` 读写：
+   *  - 读：`remote.settings.describe()` → 解包 RPC 信封 → 按 ns 找 `namespaces[]`；
+   *  - 变更：`remote.$on('settings/document-updated')` —— 该事件在内核的转发
+   *    白名单里（dsh-api-remotes 的 `API_REMOTE_FORWARDED_EVENTS`，mode: 'emit'），
+   *    内核自己的设置页也是这么订阅的（见 dsh-client-ui-settings 的
+   *    `SettingsDescribeMirror`）。**无轮询**：host 推 `_push` 必然改 revision，
+   *    于是事件只在真实推送时到达。
+   *
+   * 载荷结构与 0.1.5 时代完全一致（`_push` / `_ops` 仍是 JSON 字符串），故下面
+   * 的解析与 `*SessionId` 归属守卫逐字保留。
+   */
+  const remote = remoteOf(ctx);
+  if (remote?.settings !== undefined) {
+    let lastRevision = -1;
+    let describeInFlight = false;
     const applySettings = (): void => {
-      const snap = scope.getSnapshot();
-      const v = snap.value ?? {};
-      let pushed: {
-        suggestion?: unknown;
-        hot?: unknown;
-        history?: unknown;
-        historySessionId?: unknown;
-        suggestionSessionId?: unknown;
-      } | null = null;
-      if (typeof v._push === 'string' && v._push !== '') {
+      void (async () => {
+        if (describeInFlight) return;
+        describeInFlight = true;
         try {
-          pushed = JSON.parse(v._push) as typeof pushed;
+          const described = await remote.settings!.describe();
+          const list = unwrapSettingsDoc(described)?.namespaces ?? [];
+          const entry = list.find((row) => row.ns === SETTINGS_NAMESPACE);
+          if (entry === undefined) return;
+          // revision 未变说明没人改过（事件可能因其他命名空间的写入而到达）。
+          const rev = typeof entry.revision === 'number' ? entry.revision : 0;
+          if (rev === lastRevision) return;
+          lastRevision = rev;
+          const v = (entry.value ?? {}) as Record<string, unknown>;
+          let pushed: {
+            suggestion?: unknown;
+            hot?: unknown;
+            history?: unknown;
+            historySessionId?: unknown;
+            suggestionSessionId?: unknown;
+          } | null = null;
+          if (typeof v._push === 'string' && v._push !== '') {
+            try {
+              pushed = JSON.parse(v._push) as typeof pushed;
+            } catch {
+              pushed = null;
+            }
+          }
+          settings = {
+            historyEnabled: typeof v.historyEnabled === 'boolean' ? v.historyEnabled : true,
+            historyCrossSession: typeof v.historyCrossSession === 'boolean' ? v.historyCrossSession : false,
+            historyMaxEntries: typeof v.historyMaxEntries === 'number' ? v.historyMaxEntries : 50,
+            historyMinChars: typeof v.historyMinChars === 'number' ? v.historyMinChars : 1,
+            wordAccept: typeof v.wordAccept === 'boolean' ? v.wordAccept : true,
+            suggestion: pushed?.suggestion === null || pushed?.suggestion === undefined
+              ? null
+              : (pushed.suggestion as typeof settings.suggestion),
+            hot: pushed?.hot === null || pushed?.hot === undefined
+              ? null
+              : (pushed.hot as typeof settings.hot),
+            // history 省略 = host 本次推送不携带历史（保留现值）。启动对账推送正是
+            // 这种形态：它只负责恢复建议，历史留给紧随其后的 pull 应答，此时若把
+            // 本地历史清成 [] 会把「切回会话仍有历史」的体验一起清掉。
+            history: Array.isArray(pushed?.history)
+              ? (pushed?.history as unknown[]).filter((t): t is string => typeof t === 'string')
+              : settings.history,
+            historySessionId: Array.isArray(pushed?.history)
+              ? (typeof pushed?.historySessionId === 'string' ? pushed.historySessionId : null)
+              : settings.historySessionId,
+            suggestionSessionId: typeof pushed?.suggestionSessionId === 'string' ? pushed.suggestionSessionId : null,
+          };
+          render();
         } catch {
-          pushed = null;
+          // describe 失败（网络抖动/后端未就绪）时保留现值，等下一个事件或重连。
+        } finally {
+          describeInFlight = false;
         }
-      }
-      settings = {
-        historyEnabled: typeof v.historyEnabled === 'boolean' ? v.historyEnabled : true,
-        historyCrossSession: typeof v.historyCrossSession === 'boolean' ? v.historyCrossSession : false,
-        historyMaxEntries: typeof v.historyMaxEntries === 'number' ? v.historyMaxEntries : 50,
-        historyMinChars: typeof v.historyMinChars === 'number' ? v.historyMinChars : 1,
-        wordAccept: typeof v.wordAccept === 'boolean' ? v.wordAccept : true,
-        suggestion: pushed?.suggestion === null || pushed?.suggestion === undefined
-          ? null
-          : (pushed.suggestion as typeof settings.suggestion),
-        hot: pushed?.hot === null || pushed?.hot === undefined
-          ? null
-          : (pushed.hot as typeof settings.hot),
-        // history 省略 = host 本次推送不携带历史（保留现值）。启动对账推送正是
-        // 这种形态：它只负责恢复建议，历史留给紧随其后的 pull 应答，此时若把
-        // 本地历史清成 [] 会把「切回会话仍有历史」的体验一起清掉。
-        history: Array.isArray(pushed?.history)
-          ? (pushed?.history as unknown[]).filter((t): t is string => typeof t === 'string')
-          : settings.history,
-        historySessionId: Array.isArray(pushed?.history)
-          ? (typeof pushed?.historySessionId === 'string' ? pushed.historySessionId : null)
-          : settings.historySessionId,
-        suggestionSessionId: typeof pushed?.suggestionSessionId === 'string' ? pushed.suggestionSessionId : null,
-      };
-      render();
+      })();
     };
-    scope.subscribe?.(applySettings);
-    ghostPullScope = scope;
+    // 首读一次（事件只推增量），此后由内核转发的事件驱动——无轮询。
+    // `connection/reset` 后需重新首读：那之前的订阅与缓存都可能已失效。
+    const offUpdated = remote.$on?.('settings/document-updated', () => applySettings());
+    const offReset = ctx.on('connection/reset', () => applySettings());
+    ctx.effect(() => () => {
+      offUpdated?.();
+      offReset();
+    });
     applySettings();
   }
 
@@ -653,8 +1086,8 @@ function apply(ctx: Context): void {
     // 历史环的拉取在 resolve() 绑定成功处统一发起（冷启动经上面的 rebind），
     // 这里不再补发——旧的「初始化时拉一次」在会话尚未就绪时必然落空。
     const onList = (): void => {
-      // 会话切换（current 变化）→ 重绑订阅（resolve 内即发起 pull）；否则仅渲染。
-      const id = sessions.list.getSnapshot().current as string | undefined;
+      // 会话切换（mainView 保有者变化）→ 重绑订阅（resolve 内即发起 pull）；否则仅渲染。
+      const id = currentSessionIdOf(sessions.list.getSnapshot());
       if (id !== lastSessionId) rebind();
       render();
     };
@@ -686,20 +1119,203 @@ function apply(ctx: Context): void {
     };
   }, 'dsh-suggest-ghost: composer ghost render');
 
-  // 设置卡片：独立读取 slots/settingsScope（可选服务，缺失时不阻塞幽灵逻辑）。
-  // locale 同为可选增强（卡片文案跟随宿主界面语言）：经 ctx.get 无门控可选
-  // 读取后随槽位 inject 下发；缺失/旧宿主组合由 useGhostT 回退中文。
-  const slots = ctx.get('slots');
-  const settingsScopeForCard = ctx.get('settingsScope');
-  if (slots === undefined || settingsScopeForCard === undefined) return;
+  // 设置界面：往 `settings.section` 注册一个**独立设置页**。
+  //
+  // 槽位名必须是宿主真实存在的那个：`settings.section`（`kind: 'list'`、
+  // `scope: 'root'`，每个 list entry 一页设置）。注册项靠 `id` 作导航标识、
+  // `order` 定位置、`label` 出导航文案。
+  //
+  // **不要用 `settings.plugin.item`**：那个名字在 DSH 0.1.7-rc.2 与 0.2.0-rc.2
+  // 里都不存在（全仓 grep 零命中）。往不存在的槽位注册不会报错，只是永远没人
+  // 消费——表现为「服务都拿到了、注册也执行了、界面就是不画」，极难排查。
+  // 宿主实际提供的相关槽位是 `settings.section` / `settings.plugins` /
+  // `settings.plugins.tab` / `settings.general.item`。
+  //
+  // `label` 传 thunk：宿主每次投影都会重读，语言切换后无需重新注册。文案走本文件
+  // 的 SECTION_LABELS + locale 快照（`sectionLabel()`），不依赖 locale/ 资源文件
+  // ——`settings.section` 的 `label` 是普通函数，不是内核 locale 目录查找。
+
   const locale = ctx.get('locale') as LocaleFaceLike | undefined;
-  slots.inject('settings.plugin.item', () => slots.register({
-    name: 'settings.plugin.item',
-    // keyed slot：必须给 key（宿主按命名空间 dispatch，entryKey=namespace）。
-    key: SETTINGS_NAMESPACE,
-    order: 30,
-    inject: () => ({ scope: settingsScopeForCard.bind({ namespace: SETTINGS_NAMESPACE }), locale }),
+
+  // 插件详情页卡片（0.1.7+ / 0.2.0+）：configForms 表单 + `plugins.bundle.config` 卡片。
+  // 寻址键是条目 id（`cordis.patch.yml` 的 `id: suggest-ghost`），不是 settings namespace。
+  // 注意：configForms 不在顶层 inject，用嵌套 ctx.inject 按需等待（与 later 插件一致）。
+  // 必须在提前返回之前注册，否则 remote.settings 缺失时卡片不会显示。
+  const ENTRY_ID = 'suggest-ghost';
+  // 必须用 ctx.slots（不是 ctx.get('slots')），两者在 0.2.0 中是不同的对象。
+  // later 插件直接用 ctx.slots.inject / ctx.slots.register 才能正确注册到宿主。
+  // key 必须是**插件包名**（dsh-suggest-ghost）：宿主按
+  // `ledger.bundles.has(pkg.name)` 判断是否渲染配置区，
+  // key 不匹配 → configured=false → 卡片静默不渲染。
+  // 寻址键（entryId）只用于 configForms.get()，与此无关。
+  if ((ctx as any).slots !== undefined) {
+    ctx.inject(['configForms'], () => {
+      const forms = ctx.get('configForms') as any;
+      if (forms === undefined || typeof forms.get !== 'function' || typeof forms.whileServed !== 'function') return;
+      const formScope = forms.get(ENTRY_ID);
+      ctx.effect(
+        () =>
+          forms.whileServed([ENTRY_ID], () =>
+            (ctx as any).slots.inject('plugins.bundle.config', () =>
+              (ctx as any).slots.register({
+                name: 'plugins.bundle.config',
+                key: 'dsh-suggest-ghost',
+                locale: 'dsh-suggest-ghost',
+                inject: () => ({ scope: formScope, locale, surface: 'detail' as const }),
+              }, SuggestGhostCard),
+            ),
+          ),
+        'dsh-suggest-ghost: plugins-page card',
+      );
+    });
+  }
+
+  // 设置对话框中的设置页：默认不显示，由插件详情页的开关控制。
+  // 开关状态存储在 localStorage 中，key 为 'dsh-suggest-ghost:show-settings-section'。
+  const remoteForCard = remoteOf(ctx);
+  if ((ctx as any).slots === undefined || remoteForCard?.settings === undefined) return;
+
+  const SHOW_SETTINGS_KEY = 'dsh-suggest-ghost:show-settings-section';
+  const showSettingsSection = typeof localStorage !== 'undefined' && localStorage.getItem(SHOW_SETTINGS_KEY) === 'true';
+
+  if (!showSettingsSection) return;
+
+  // scope **只建一次**并挂在注册表上：
+  //  - 在 `inject` 里现建会让每次渲染都换一个新 scope（新的事件订阅 + 空快照），
+  //    卡片拿到的永远是 `status: 'loading'`；
+  //  - 生命周期由槽位 disposer 负责（卸载时退订），与卡片的订阅互不干扰。
+  const cardScope = remoteSettingsScope(remoteForCard, SETTINGS_NAMESPACE);
+  const disposeSection = (ctx as any).slots.inject('settings.section', () => (ctx as any).slots.register({
+    name: 'settings.section',
+    // 自有 id：用宿主没有的 id 才会「并排新增一页」，复用宿主 id 会顶掉那一页。
+    id: SETTINGS_SECTION_ID,
+    order: 40,
+    label: () => sectionLabel(locale),
+    // 卡片只依赖 scope 的 get/subscribe/set 三个成员（见 settings-card.tsx 的
+    // PluginSettingsScope），这里用 remote.settings 适配出同形状的最小面：
+    // 0.1.7 已无 settingsScope 服务，而卡片逻辑（读快照 / 订阅变更 / 写字段）
+    // 与代次无关，不必改卡片本体。
+    inject: () => ({ scope: cardScope, locale, surface: 'settings' as const }),
   }, SuggestGhostCard));
+  if (typeof disposeSection === 'function') {
+    ctx.effect(() => () => {
+      disposeSection();
+      cardScope.dispose();
+    });
+  }
+}
+
+/**
+ * 把 `remote.settings` 适配成设置卡片要用的 scope 最小面（store 形状：
+ * getSnapshot / subscribe / set）。
+ *
+ * 这是 0.1.7 的替代品：旧 `settingsScope.bind({namespace})` 返回的对象直接给
+ * `SuggestGhostCard`。**形状以卡片的实际调用为准**（settings-card.tsx）：
+ *  - getSnapshot：返回 {@link ScopeSnapshot} **信封**（`status` / `value` /
+ *    `writable`），引用稳定——卡片拿它当 `useState` 初值，返回新对象会每次订阅
+ *    都重渲染；
+ *  - subscribe：内核转发 `settings/document-updated` 事件即通知（回调不传参，
+ *    调用方重读快照）；
+ *  - set：经 `mutate` 写单个 volatile 字段，返回 Promise 供卡片 `await`。
+ *
+ * ⚠️ **信封而非裸值**：卡片读的是 `snap.status` / `snap.value` / `snap.writable`，
+ * 直接返回 `entry.value` 会让 `status` 恒 undefined、`writable` 恒 falsy——表现为
+ * 设置页所有控件虽渲染但显示「当前部署不可写（内存模式）」、保存必然失败。
+ * 两边都标注成 `Record<string, unknown>`（索引签名把两种形状都吞了），所以
+ * TypeScript 不会替你发现这个错配，改动此处务必对照卡片源码。
+ */
+function remoteSettingsScope(
+  remote: RemoteLike,
+  ns: string,
+): PluginSettingsScope<ScopeSnapshot> {
+  // 快照引用稳定：只在 describe 真正拿到新 revision 时整体替换。
+  let snapshot: ScopeSnapshot = { status: 'loading', value: {}, writable: false };
+  let revision = -1;
+  const listeners: Array<() => void> = [];
+  let disposed = false;
+
+  const notify = (): void => {
+    for (const listener of [...listeners]) {
+      try {
+        listener();
+      } catch {
+        // 单个订阅者抛错不牵连其余（与内核 store 的订阅语义一致）。
+      }
+    }
+  };
+
+  const readValue = (): void => {
+    void (async () => {
+      if (disposed) return;
+      try {
+        const described = await remote.settings?.describe();
+        const doc = unwrapSettingsDoc(described);
+        const entry = (doc?.namespaces ?? []).find((row) => row.ns === ns);
+        if (entry === undefined) return;
+        const rev = typeof entry.revision === 'number' ? entry.revision : 0;
+        if (rev === revision) return;
+        revision = rev;
+        snapshot = {
+          status: 'ready',
+          value: (entry.value ?? {}) as Record<string, unknown>,
+          // `writable` 是 describe() 的**外层**字段（整个设置文档可否写），
+          // 不是命名空间条目的字段。缺省视为可写（旧宿主不带该字段）。
+          writable: doc?.writable !== false,
+        };
+        notify();
+      } catch {
+        // 后端未就绪时保留现值，等下一个事件或调用方重试。
+      }
+    })();
+  };
+
+  // 启动即读一次（卡片 mount 时就能拿到真值，不必等首个事件）。
+  readValue();
+  // 此后由内核转发的设置变更事件驱动——**无轮询**。`$on` 返回的 disposer 归
+  // `dispose()` 管（scope 与订阅者是多对一：单个订阅者退订不销毁 scope）。
+  const offUpdated = remote.$on?.('settings/document-updated', () => readValue());
+
+  return {
+    getSnapshot: () => snapshot,
+    subscribe: (listener) => {
+      listeners.push(listener);
+      // 退订**只移除这一个监听者**，绝不销毁 scope 本身。
+      //
+      // 踩过的坑：这里原本在退订时销毁了 scope（停掉其变更订阅），结果 React 卸载卡片时
+      // （StrictMode 的挂载→卸载→再挂载、或用户切走设置页）scope 会永久失效，
+      // `getSnapshot()` 永远停在 `status: 'loading'`、初始空值上——表现为所有控件
+      // 都渲染成「当前部署不可写（内存模式）」且不显示任何真实取值。
+      // scope 与订阅者是多对一关系，退订一个订阅者无权销毁它。
+      return () => {
+        const i = listeners.indexOf(listener);
+        if (i >= 0) listeners.splice(i, 1);
+      };
+    },
+    set: (key, next) => {
+      const svc = remote.settings;
+      if (svc === undefined) return Promise.resolve();
+      // `expectedRevision` 必填：用最近一次 describe 拿到的 revision。
+      // revision 尚未取到（仍为 -1）时先用 0；host 会以不匹配拒绝，宿主随后
+      // 推来的事件会带回真值，用户重试即可，不会静默写坏数据。
+      const expected = revision < 0 ? 0 : revision;
+      return svc.mutate(ns, [{ op: 'set', path: [key], value: next }], expected)
+        .then(() => {
+          readValue();
+        })
+        .catch(() => {
+          // 写入失败（revision 冲突/后端未就绪）：宿主随后推来的事件会带回真值。
+        });
+    },
+    dispose: () => {
+      disposed = true;
+      offUpdated?.();
+      listeners.length = 0;
+    },
+  };
+}
+
+function apply(ctx: Context): void {
+  applyInner(ctx);
 }
 
 export { apply, inject, name };
