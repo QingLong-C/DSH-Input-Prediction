@@ -19,5 +19,7 @@ export declare function sanitizeSuggestion(text: string, maxChars: number): {
 };
 /** 检测文本是否含中日韩字符（决定建议回复语言）。 */
 export declare function hasCJK(text: string): boolean;
+/** 检测文本是否含西里尔字母（俄语等）。 */
+export declare function hasCyrillic(text: string): boolean;
 /** 判定净化后的输出是否应丢弃（返回 true = 无建议）。 */
 export declare function shouldFilterSuggestion(text: string): boolean;

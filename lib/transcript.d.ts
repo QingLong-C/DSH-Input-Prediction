@@ -35,7 +35,9 @@ export declare function frameTranscript(pairs: readonly TranscriptPair[]): strin
  * 源消息 seq 与 pairs 同步裁剪。
  */
 export declare function trimTranscript(pairs: readonly TranscriptPair[], sourceMessageSeqs: readonly number[], maxTranscriptChars: number, maxInputBytes: number): TrimmedTranscript;
-/** 建议回复语言跟随会话（最后一条用户消息含 CJK → 简体中文）。 */
+/** 建议回复语言跟随会话（最后一条用户消息的文字系统）。 */
 export declare function suggestionLanguage(pairs: readonly TranscriptPair[]): string;
 /** 检测文本是否含中日韩字符（决定建议回复语言）。 */
 export declare function hasCJK(text: string): boolean;
+/** 检测文本是否含西里尔字母（俄语等）。 */
+export declare function hasCyrillic(text: string): boolean;

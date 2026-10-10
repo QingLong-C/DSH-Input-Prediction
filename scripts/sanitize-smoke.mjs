@@ -6,7 +6,9 @@ import {
   sanitizeSuggestion,
   shouldFilterSuggestion,
   hasCJK,
+  hasCyrillic,
 } from '../src/sanitize.ts';
+import { suggestionLanguage } from '../src/transcript.ts';
 
 // —— 转录脱敏：发送前掩蔽常见凭据 ——
 assert.ok(!redactSecrets('AKIA1234567890ABCDEF is a key').includes('AKIA'));
@@ -63,5 +65,24 @@ assert.equal(hasCJK('帮我处理一下'), true);
 assert.equal(hasCJK('日本語テスト'), true);
 assert.equal(hasCJK('한국어 테스트'), false); // 韩文 Hangul 不在覆盖范围（插件仅映射中/英语言）
 assert.equal(hasCJK('hello 中文混排'), true);
+
+// —— 西里尔检测（俄语等） ——
+assert.equal(hasCyrillic('hello world'), false);
+assert.equal(hasCyrillic('Создай файл'), true); // 俄语
+assert.equal(hasCyrillic('Привет мир'), true); // 俄语
+assert.equal(hasCyrillic('hello 中文'), false);
+
+// —— 建议语言推断（GitHub #1：俄语等非 CJK 文字不应回退到 English） ——
+assert.equal(suggestionLanguage([{ role: 'user', text: '帮我写个函数' }]), '简体中文');
+assert.equal(suggestionLanguage([{ role: 'user', text: 'Создай файл hello.txt' }]), 'Russian');
+assert.equal(suggestionLanguage([{ role: 'user', text: 'write a function' }]), 'the same language the user wrote their last message in');
+// 多轮：取最后一条 user 消息
+assert.equal(suggestionLanguage([
+  { role: 'user', text: 'write a function' },
+  { role: 'assistant', text: 'sure' },
+  { role: 'user', text: 'Создай файл' },
+]), 'Russian');
+// 空 pairs 回退 English
+assert.equal(suggestionLanguage([]), 'English');
 
 console.log('✅ sanitize 冒烟测试通过');

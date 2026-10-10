@@ -104,11 +104,13 @@ export function trimTranscript(
   };
 }
 
-/** 建议回复语言跟随会话（最后一条用户消息含 CJK → 简体中文）。 */
+/** 建议回复语言跟随会话（最后一条用户消息的文字系统）。 */
 export function suggestionLanguage(pairs: readonly TranscriptPair[]): string {
   for (const pair of [...pairs].reverse()) {
     if (pair.role !== 'user') continue;
-    return hasCJK(pair.text) ? '简体中文' : 'English';
+    if (hasCJK(pair.text)) return '简体中文';
+    if (hasCyrillic(pair.text)) return 'Russian';
+    return 'the same language the user wrote their last message in';
   }
   return 'English';
 }
@@ -116,4 +118,9 @@ export function suggestionLanguage(pairs: readonly TranscriptPair[]): string {
 /** 检测文本是否含中日韩字符（决定建议回复语言）。 */
 export function hasCJK(text: string): boolean {
   return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/.test(text);
+}
+
+/** 检测文本是否含西里尔字母（俄语等）。 */
+export function hasCyrillic(text: string): boolean {
+  return /[\u0400-\u04ff]/.test(text);
 }
