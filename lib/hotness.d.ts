@@ -69,7 +69,12 @@ export declare class HotnessTable {
     addEntry(text: string, pinned?: boolean): boolean;
     /** 管理操作：清空全表（持久层经 onChange(null) 同步删除）。返回删除条数。 */
     clearAll(): number;
-    /** 淘汰 lastSeq 最小的条目（最久未出现者优先出局）；固定条目豁免。 */
+    /**
+     * 淘汰优先级最高的条目（堆顶 = (seq, count) 最小）：
+     *  - `seq` 最小 → 最久未出现的条目先走
+     *  - 同 `seq`（如恢复条目全为 -∞）→ 低 `count` 先走
+     * 固定条目豁免。
+     */
     private evictLeastRecent;
     /** 重建堆，只保留与表内当前 lastSeq 一致的有效版本（O(表大小)）。 */
     private compactHeap;

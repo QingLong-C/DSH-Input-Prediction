@@ -32,14 +32,14 @@ import type { Config as GenerateConfig } from './generate.js';
  * 读值一律走 `flattenConfig()` 的 `readVolatile()`，拿到的才是裸值。
  */
 export interface PluginConfigValues {
-    maxInputBytes: number;
-    maxOutputTokens: number;
-    timeoutMs: number;
-    maxRecentTurns: number;
-    maxTranscriptChars: number;
-    maxSuggestionChars: number;
-    provider: string;
-    model: string;
+    maxInputBytes: Volatile<number>;
+    maxOutputTokens: Volatile<number>;
+    timeoutMs: Volatile<number>;
+    maxRecentTurns: Volatile<number>;
+    maxTranscriptChars: Volatile<number>;
+    maxSuggestionChars: Volatile<number>;
+    provider: Volatile<string>;
+    model: Volatile<string>;
     llmEnabled: Volatile<boolean>;
     historyEnabled: Volatile<boolean>;
     historyCrossSession: Volatile<boolean>;
@@ -47,6 +47,8 @@ export interface PluginConfigValues {
     historyMinChars: Volatile<number>;
     wordAccept: Volatile<boolean>;
     acceptKey: Volatile<string>;
+    languageMode: Volatile<string>;
+    uiLocaleWeight: Volatile<number>;
     _ops: Volatile<string>;
     _push: Volatile<string>;
 }
@@ -59,6 +61,25 @@ export interface PluginConfigValues {
  * 对不上而报 TS2322。输入形状用 `Schemastery.TypeS<typeof ConfigSchema>` 取回。
  */
 declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
+    /** 最终框架化用户提示的最大 UTF-8 字节数。 */
+    maxInputBytes: z<number, number, "volatile-defined">;
+    /** 建议生成输出令牌上限（推理模型需留足预算，如 512）。 */
+    maxOutputTokens: z<number, number, "volatile-defined">;
+    /** 辅助请求端到端截止时间（毫秒）。 */
+    timeoutMs: z<number, number, "volatile-defined">;
+    /** 转录尾部保留的最近完成回合数（默认 1：只取最后一轮）。 */
+    maxRecentTurns: z<number, number, "volatile-defined">;
+    /** 转录字符预算。 */
+    maxTranscriptChars: z<number, number, "volatile-defined">;
+    /** 建议可见字符上限。 */
+    maxSuggestionChars: z<number, number, "volatile-defined">;
+    /**
+     * 显式路由对；`z.string().default('')` 而非 `min(1)`：留空表示「继承主请求
+     * 最近记录的路由」。若保持必填，volatile 表单会把插件逼成「不填就不能启动」，
+     * 而继承语义恰恰要求它是可选的。
+     */
+    provider: z<string, string, "volatile-defined">;
+    model: z<string, string, "volatile-defined">;
     /** LLM 下一条建议开关（默认开）；关闭后每回合不再调用建议模型。 */
     llmEnabled: z<boolean, boolean, "volatile-defined">;
     /** 是否启用历史前缀补全。 */
@@ -74,6 +95,17 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     /** 采纳建议的输入框快捷键（默认 Tab）。 */
     acceptKey: z<string, string, "volatile-defined">;
     /**
+     * 建议语言模式：'auto' = 自动推断（结合 UI 语言 + 用户消息文字分布）；
+     * 'zh' / 'zh-TW' / 'en' / 'ja' / 'ko' / 'ru' / 'fr' / 'de' / 'es' = 强制指定语言。
+     * 未知代码在 host 端回退 English（见 generate.ts 的 LANGUAGE_NAMES）。
+     */
+    languageMode: z<string, string, "volatile-defined">;
+    /**
+     * UI 语言先验权重（仅 auto 模式生效）：值越大越倾向 UI 语言。
+     * 默认 100 ≈ 2-3 条中等长度消息的置信度。
+     */
+    uiLocaleWeight: z<number, number, "volatile-defined">;
+    /**
      * client → host 的热度管理操作队列（JSON 字符串）。
      *
      * 0.1.7 的 `SettingsForms.write()` 只接受 volatile 路径（`isVolatilePath`
@@ -88,26 +120,26 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
      * 侧的解析与 `*SessionId` 归属守卫无需改动——变的只是字段载体。
      */
     _push: z<string, string, "volatile-defined">;
-    /** 最终框架化用户提示的最大 UTF-8 字节数。 */
-    maxInputBytes: z<number, number, "defined">;
-    /** 建议生成输出令牌上限（推理模型需留足预算，如 512）。 */
-    maxOutputTokens: z<number, number, "defined">;
-    /** 辅助请求端到端截止时间（毫秒）。 */
-    timeoutMs: z<number, number, "defined">;
-    /** 转录尾部保留的最近完成回合数（默认 1：只取最后一轮）。 */
-    maxRecentTurns: z<number, number, "defined">;
-    /** 转录字符预算。 */
-    maxTranscriptChars: z<number, number, "defined">;
-    /** 建议可见字符上限。 */
-    maxSuggestionChars: z<number, number, "defined">;
-    /**
-     * 显式路由对；`z.string().default('')` 而非 `min(1)`：留空表示「继承主请求
-     * 最近记录的路由」。若保持必填，volatile 表单会把插件逼成「不填就不能启动」，
-     * 而继承语义恰恰要求它是可选的。
-     */
-    provider: z<string, string, "defined">;
-    model: z<string, string, "defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
+    /** 最终框架化用户提示的最大 UTF-8 字节数。 */
+    maxInputBytes: z<number, number, "volatile-defined">;
+    /** 建议生成输出令牌上限（推理模型需留足预算，如 512）。 */
+    maxOutputTokens: z<number, number, "volatile-defined">;
+    /** 辅助请求端到端截止时间（毫秒）。 */
+    timeoutMs: z<number, number, "volatile-defined">;
+    /** 转录尾部保留的最近完成回合数（默认 1：只取最后一轮）。 */
+    maxRecentTurns: z<number, number, "volatile-defined">;
+    /** 转录字符预算。 */
+    maxTranscriptChars: z<number, number, "volatile-defined">;
+    /** 建议可见字符上限。 */
+    maxSuggestionChars: z<number, number, "volatile-defined">;
+    /**
+     * 显式路由对；`z.string().default('')` 而非 `min(1)`：留空表示「继承主请求
+     * 最近记录的路由」。若保持必填，volatile 表单会把插件逼成「不填就不能启动」，
+     * 而继承语义恰恰要求它是可选的。
+     */
+    provider: z<string, string, "volatile-defined">;
+    model: z<string, string, "volatile-defined">;
     /** LLM 下一条建议开关（默认开）；关闭后每回合不再调用建议模型。 */
     llmEnabled: z<boolean, boolean, "volatile-defined">;
     /** 是否启用历史前缀补全。 */
@@ -123,6 +155,17 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     /** 采纳建议的输入框快捷键（默认 Tab）。 */
     acceptKey: z<string, string, "volatile-defined">;
     /**
+     * 建议语言模式：'auto' = 自动推断（结合 UI 语言 + 用户消息文字分布）；
+     * 'zh' / 'zh-TW' / 'en' / 'ja' / 'ko' / 'ru' / 'fr' / 'de' / 'es' = 强制指定语言。
+     * 未知代码在 host 端回退 English（见 generate.ts 的 LANGUAGE_NAMES）。
+     */
+    languageMode: z<string, string, "volatile-defined">;
+    /**
+     * UI 语言先验权重（仅 auto 模式生效）：值越大越倾向 UI 语言。
+     * 默认 100 ≈ 2-3 条中等长度消息的置信度。
+     */
+    uiLocaleWeight: z<number, number, "volatile-defined">;
+    /**
      * client → host 的热度管理操作队列（JSON 字符串）。
      *
      * 0.1.7 的 `SettingsForms.write()` 只接受 volatile 路径（`isVolatilePath`
@@ -137,25 +180,6 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
      * 侧的解析与 `*SessionId` 归属守卫无需改动——变的只是字段载体。
      */
     _push: z<string, string, "volatile-defined">;
-    /** 最终框架化用户提示的最大 UTF-8 字节数。 */
-    maxInputBytes: z<number, number, "defined">;
-    /** 建议生成输出令牌上限（推理模型需留足预算，如 512）。 */
-    maxOutputTokens: z<number, number, "defined">;
-    /** 辅助请求端到端截止时间（毫秒）。 */
-    timeoutMs: z<number, number, "defined">;
-    /** 转录尾部保留的最近完成回合数（默认 1：只取最后一轮）。 */
-    maxRecentTurns: z<number, number, "defined">;
-    /** 转录字符预算。 */
-    maxTranscriptChars: z<number, number, "defined">;
-    /** 建议可见字符上限。 */
-    maxSuggestionChars: z<number, number, "defined">;
-    /**
-     * 显式路由对；`z.string().default('')` 而非 `min(1)`：留空表示「继承主请求
-     * 最近记录的路由」。若保持必填，volatile 表单会把插件逼成「不填就不能启动」，
-     * 而继承语义恰恰要求它是可选的。
-     */
-    provider: z<string, string, "defined">;
-    model: z<string, string, "defined">;
 }>>, "plain">;
 export declare const Config: z<Schemastery.TypeS<typeof ConfigSchema>, PluginConfigValues>;
 /** 所需服务：LLM 路由 + 会话存储。 */

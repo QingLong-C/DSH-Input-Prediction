@@ -60,6 +60,8 @@ type EntriesTable = KvTable<string, HotEntryRecord>;
 export interface HotnessOpsPayload {
   readonly rev: number;
   readonly ops: readonly HotnessOp[];
+  /** client 的 UI 语言（'zh' | 'en'）；捎带在每次 _ops 写入中，host 据此做语言先验。 */
+  readonly locale?: string;
 }
 
 /** 持久化句柄：index.ts 在回合结束时调用 flush，卸载时 close 兜底。 */
@@ -235,23 +237,34 @@ const opsPayloadSchema = z.object({
       z.object({ op: z.literal('pull'), sessionId: z.string().min(1) }),
     ]),
   ),
+  /** client UI 语言（'zh' | 'en'）；可选，捎带在每次 _ops 写入中。 */
+  locale: z.string().optional(),
 });
 
+/** `_ops` 解析结果：操作批 + 可选的 UI 语言。 */
+export interface ParsedOpsResult {
+  readonly ops: readonly HotnessOp[];
+  readonly locale?: string;
+}
+
 /**
- * 解析 client 写入 `_ops` 的 JSON 载荷：非法/空载荷返回空数组（调用方据此
+ * 解析 client 写入 `_ops` 的 JSON 载荷：非法/空载荷返回空结果（调用方据此
  * 跳过消费）。上限防御：单批操作数最多 1000（防畸形巨载荷拖住写链）。
  */
-export function parseHotnessOps(raw: string | undefined): readonly HotnessOp[] {
-  if (typeof raw !== 'string' || raw === '' || raw === EMPTY_OPS) return [];
+export function parseHotnessOps(raw: string | undefined): ParsedOpsResult {
+  if (typeof raw !== 'string' || raw === '' || raw === EMPTY_OPS) return { ops: [] };
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return [];
+    return { ops: [] };
   }
   const result = opsPayloadSchema.safeParse(parsed);
-  if (!result.success) return [];
-  return result.data.ops.slice(0, 1000);
+  if (!result.success) return { ops: [] };
+  return {
+    ops: result.data.ops.slice(0, 1000),
+    locale: result.data.locale,
+  };
 }
 
 /** `_ops` 的空载荷（JSON 字符串的 null 表示；与 settings.EMPTY_PUSH 同值）。 */

@@ -30,7 +30,7 @@ import { useGhostT, type GhostLang, type LocaleFaceLike } from './useGhostT.ts';
 import { injectStyles } from './styles.ts';
 
 /** 字段输入形态。 */
-export type FieldKind = 'number' | 'text' | 'boolean' | 'key';
+export type FieldKind = 'number' | 'text' | 'boolean' | 'key' | 'select';
 
 /** 双语文案值（zh 为源语言）。 */
 export interface Bilingual {
@@ -50,11 +50,24 @@ export const GHOST_FIELDS: ReadonlyArray<{
   readonly label: Bilingual;
   readonly hint: Bilingual;
   readonly kind: FieldKind;
-  readonly section: 'llm' | 'history';
+  readonly section: 'llm' | 'history' | 'language';
   /** 是否可经设置页写回（false = 只能改配置文件）。 */
   readonly writable: boolean;
+  /** select 控件的选项列表（仅 kind='select' 时使用）。 */
+  readonly options?: ReadonlyArray<{ readonly value: string; readonly label: Bilingual }>;
 }> = [
   // —— LLM 下一条建议 ——
+  {
+    key: 'maxInputBytes',
+    label: { zh: '输入字节上限', en: 'Input byte cap' },
+    hint: {
+      zh: '最终框架化用户提示的最大 UTF-8 字节数',
+      en: 'Max UTF-8 bytes of the final framed user prompt',
+    },
+    kind: 'number',
+    section: 'llm',
+    writable: true,
+  },
   {
     key: 'maxOutputTokens',
     label: { zh: '输出令牌上限', en: 'Output token cap' },
@@ -64,7 +77,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'number',
     section: 'llm',
-    writable: false,
+    writable: true,
   },
   {
     key: 'maxSuggestionChars',
@@ -72,7 +85,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     hint: { zh: '幽灵文本可见字符数上限', en: 'Max visible characters of the ghost text' },
     kind: 'number',
     section: 'llm',
-    writable: false,
+    writable: true,
   },
   {
     key: 'maxRecentTurns',
@@ -83,7 +96,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'number',
     section: 'llm',
-    writable: false,
+    writable: true,
   },
   {
     key: 'maxTranscriptChars',
@@ -94,7 +107,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'number',
     section: 'llm',
-    writable: false,
+    writable: true,
   },
   {
     key: 'timeoutMs',
@@ -105,7 +118,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'number',
     section: 'llm',
-    writable: false,
+    writable: true,
   },
   {
     key: 'acceptKey',
@@ -138,7 +151,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'text',
     section: 'llm',
-    writable: false,
+    writable: true,
   },
   {
     key: 'model',
@@ -149,7 +162,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
     },
     kind: 'text',
     section: 'llm',
-    writable: false,
+    writable: true,
   },
   // —— 历史前缀补全 ——
   {
@@ -207,6 +220,41 @@ export const GHOST_FIELDS: ReadonlyArray<{
     section: 'history',
     writable: true,
   },
+  // —— 语言设置 ——
+  {
+    key: 'languageMode',
+    label: { zh: '建议语言', en: 'Suggestion language' },
+    hint: {
+      zh: '自动：结合界面语言与消息内容推断；指定：始终使用所选语言',
+      en: 'Auto: infer from UI locale and message content; Specified: always use the selected language',
+    },
+    kind: 'select',
+    section: 'language',
+    writable: true,
+    options: [
+      { value: 'auto', label: { zh: '自动', en: 'Auto' } },
+      { value: 'zh', label: { zh: '简体中文', en: 'Simplified Chinese' } },
+      { value: 'zh-TW', label: { zh: '繁體中文', en: 'Traditional Chinese' } },
+      { value: 'en', label: { zh: 'English', en: 'English' } },
+      { value: 'ja', label: { zh: '日本語', en: 'Japanese' } },
+      { value: 'ko', label: { zh: '한국어', en: 'Korean' } },
+      { value: 'ru', label: { zh: 'Русский', en: 'Russian' } },
+      { value: 'fr', label: { zh: 'Français', en: 'French' } },
+      { value: 'de', label: { zh: 'Deutsch', en: 'German' } },
+      { value: 'es', label: { zh: 'Español', en: 'Spanish' } },
+    ],
+  },
+  {
+    key: 'uiLocaleWeight',
+    label: { zh: '界面语言权重', en: 'UI language weight' },
+    hint: {
+      zh: '自动模式下界面语言的影响力（0-500）；值越大越倾向界面语言，0 = 完全忽略界面语言',
+      en: 'Influence of the UI locale in auto mode (0-500); higher = stronger preference for UI language, 0 = ignore UI locale entirely',
+    },
+    kind: 'number',
+    section: 'language',
+    writable: true,
+  },
 ];
 
 /** 卡片 chrome 微文案源字典（zh）：键集为唯一事实来源。 */
@@ -222,6 +270,7 @@ const zhStrings = {
   /** 分组标题 */
   sectionLlm: 'LLM 下一条建议',
   sectionHistory: '历史前缀补全',
+  sectionLanguage: '语言设置',
   /** 帮助按钮无障碍标签（label 为字段名） */
   helpFor: (label: string): string => `${label}说明`,
   /** footer 状态与按钮 */
@@ -261,6 +310,7 @@ const enStrings: { [K in keyof typeof zhStrings]: (typeof zhStrings)[K] } = {
   showInSettingsHint: 'Show this plugin\'s settings page in the settings dialog (refresh to take effect)',
   sectionLlm: 'LLM next suggestion',
   sectionHistory: 'History prefix completion',
+  sectionLanguage: 'Language settings',
   helpFor: (label: string): string => `About ${label}`,
   saved: 'Saved',
   discard: 'Discard changes',
@@ -387,7 +437,7 @@ interface HotPushEntry {
 /** 热度管理分组：列表（固定/删除）、新增、清空。操作经 `_ops` 通道**即时生效**
  * （scope.set 直接写入，不进卡片的暂存/保存流程）；列表数据来自 `_push`
  * 实时推送，host 消费后回推最新状态，本组件随订阅无刷新重渲染。 */
-function HotnessSection({ scope, pushRaw, writable, busy, lang, t }: {
+function HotnessSection({ scope, pushRaw, writable, busy, lang, t, uiLocale }: {
   scope: PluginSettingsScope<Record<string, unknown>>;
   /** 当前 `_push` 字段原始值（由卡片从 scope 快照透传）。 */
   pushRaw: unknown;
@@ -395,6 +445,8 @@ function HotnessSection({ scope, pushRaw, writable, busy, lang, t }: {
   busy: boolean;
   lang: GhostLang;
   t: GhostStrings;
+  /** UI 语言（'zh' | 'en'），捎带给 host 做语言先验。 */
+  uiLocale?: string;
 }): ReactElement {
   const [search, setSearch] = useState('');
   const [adding, setAdding] = useState('');
@@ -423,7 +475,9 @@ function HotnessSection({ scope, pushRaw, writable, busy, lang, t }: {
   const sendOps = (ops: readonly HotnessOp[]): void => {
     if (!writable) return;
     opsRev.current += 1;
-    void scope.set('_ops', JSON.stringify({ rev: opsRev.current, ops }));
+    const payload: Record<string, unknown> = { rev: opsRev.current, ops };
+    if (uiLocale) payload.locale = uiLocale;
+    void scope.set('_ops', JSON.stringify(payload));
   };
 
   const needle = search.trim().toLowerCase();
@@ -656,6 +710,18 @@ export function SuggestGhostCard({ scope, locale, surface }: SuggestGhostCardPro
         t={t}
         onChange={spec => setField(f.key, spec)}
       />
+    ) : f.kind === 'select' ? (
+      <select
+        className={inputClass}
+        id={fieldId}
+        value={fieldValue(f.key)}
+        disabled={!editable || busy}
+        onChange={e => setField(f.key, e.target.value)}
+      >
+        {(f.options ?? []).map(opt => (
+          <option key={opt.value} value={opt.value}>{opt.label[lang]}</option>
+        ))}
+      </select>
     ) : (
       <input
         className={inputClass}
@@ -699,6 +765,14 @@ export function SuggestGhostCard({ scope, locale, surface }: SuggestGhostCardPro
 
   const llmFields = GHOST_FIELDS.filter(f => f.section === 'llm');
   const historyFields = GHOST_FIELDS.filter(f => f.section === 'history');
+  const languageFields = GHOST_FIELDS.filter(f => f.section === 'language');
+
+  /** Section 布局：grid = 两列并排（适合短字段），stack = 单列堆叠。 */
+  const SECTION_LAYOUT: Record<string, 'grid' | 'stack'> = {
+    llm: 'stack',
+    history: 'stack',
+    language: 'grid',
+  };
 
   return (
     <div className="sgc-settings-form">
@@ -731,11 +805,15 @@ export function SuggestGhostCard({ scope, locale, surface }: SuggestGhostCardPro
       )}
       <section className="sgc-section" aria-labelledby="sgc-section-llm">
         <h3 className="sgc-section-heading" id="sgc-section-llm">{t.sectionLlm}</h3>
-        <div className="sgc-section-fields">{llmFields.map(renderField)}</div>
+        <div className={SECTION_LAYOUT.llm === 'grid' ? 'sgc-section-fields sgc-section-fieldsGrid' : 'sgc-section-fields'}>{llmFields.map(renderField)}</div>
       </section>
       <section className="sgc-section" aria-labelledby="sgc-section-history">
         <h3 className="sgc-section-heading" id="sgc-section-history">{t.sectionHistory}</h3>
-        <div className="sgc-section-fields">{historyFields.map(renderField)}</div>
+        <div className={SECTION_LAYOUT.history === 'grid' ? 'sgc-section-fields sgc-section-fieldsGrid' : 'sgc-section-fields'}>{historyFields.map(renderField)}</div>
+      </section>
+      <section className="sgc-section" aria-labelledby="sgc-section-language">
+        <h3 className="sgc-section-heading" id="sgc-section-language">{t.sectionLanguage}</h3>
+        <div className={SECTION_LAYOUT.language === 'grid' ? 'sgc-section-fields sgc-section-fieldsGrid' : 'sgc-section-fields'}>{languageFields.map(renderField)}</div>
       </section>
       <section className="sgc-section" aria-labelledby="sgc-section-hotness">
         <button
@@ -758,6 +836,7 @@ export function SuggestGhostCard({ scope, locale, surface }: SuggestGhostCardPro
               busy={busy}
               lang={lang}
               t={t}
+              uiLocale={locale?.getSnapshot?.()?.active}
             />
           </div>
         )}

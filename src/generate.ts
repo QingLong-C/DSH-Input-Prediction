@@ -37,6 +37,23 @@ export { sessionEvents } from './coldstart.js';
 export const SUGGEST_TIMEOUT_CODE = 'SUGGEST_GHOST_TIMEOUT';
 
 /**
+ * `languageMode` 代码 → 提示词里的语言名映射。键与设置页下拉的 option value
+ * 一一对应；未知代码回退 English（schema 不限定枚举，用户手改 patch 文件时
+ * 传任意字符串都能安全落地，而不是把原文透传给模型）。
+ */
+const LANGUAGE_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  zh: '简体中文',
+  'zh-TW': '繁體中文',
+  en: 'English',
+  ja: '日本語',
+  ko: '한국어',
+  ru: 'Russian',
+  fr: 'Français',
+  de: 'Deutsch',
+  es: 'Español',
+});
+
+/**
  * 就地深冻结：迭代遍历，循环引用安全，不受调用栈深度限制。
  * 本地实现而非从内核导入——DSH 0.1.1 由 dsh-llm 导出该 helper，0.1.2 把它搬到新增的
  * dsh-util-values 并停止转发，而 dsh-util-values 在 0.1.1 内核里不存在，两个导入源在
@@ -89,6 +106,8 @@ export interface EditableConfig {
   historyMinChars?: Volatile<number> | number;
   wordAccept?: Volatile<boolean> | boolean;
   acceptKey?: Volatile<string> | string;
+  languageMode?: Volatile<string> | string;
+  uiLocaleWeight?: Volatile<number> | number;
 }
 
 /** 内核解析后的插件配置：策略字段是裸值，可调字段是引用。 */
@@ -118,6 +137,8 @@ export type FlatConfig = Config & {
   historyMinChars: number;
   wordAccept: boolean;
   acceptKey: string;
+  languageMode: string;
+  uiLocaleWeight: number;
 };
 
 /**
@@ -134,6 +155,8 @@ export function flattenConfig(config: ResolvedPluginConfig): FlatConfig {
     historyMaxEntries: readVolatile(config.historyMaxEntries, 50),
     historyMinChars: readVolatile(config.historyMinChars, 1),
     wordAccept: readVolatile(config.wordAccept, true),
+    languageMode: readVolatile(config.languageMode, 'auto'),
+    uiLocaleWeight: readVolatile(config.uiLocaleWeight, 100),
   } as FlatConfig;
 }
 
@@ -200,6 +223,8 @@ export function systemPrompt(maxSuggestionChars: number, language: string): stri
   return [
     'You are a prompt suggestion generator. Your ONLY purpose is to predict the user\'s next prompt in a coding-assistant chat — never to generate content.',
     '',
+    `OUTPUT LANGUAGE: ${language}. Every word of your suggestion MUST be in ${language}. Do NOT mix languages.`,
+    '',
     'Your job:',
     '1. Read the user\'s most recent message and the assistant\'s final answer.',
     '2. Predict what the USER would naturally type next — not what the assistant should do.',
@@ -232,7 +257,6 @@ export function systemPrompt(maxSuggestionChars: number, language: string): stri
     '',
     'Reply with ONLY the suggestion, 3-12 words, no quotes or explanation. If the next step is not obvious, reply with nothing.',
     '',
-    `Language: ${language}`,
     `At most ${maxSuggestionChars} visible characters.`,
   ].join('\n');
 }
@@ -359,7 +383,11 @@ export async function generateSuggestion(
   session: Session,
   turn: number,
   signal: AbortSignal,
-): Promise<SuggestGhostSuggested | undefined> {
+  uiLocale?: string,
+  languageMode?: string,
+  uiLocaleWeight?: number,
+  lastLanguage?: string,
+): Promise<{ suggestion: SuggestGhostSuggested | undefined; language: string }> {
   signal.throwIfAborted();
   const startedAt = Date.now();
   // buildTranscript 已按 maxInputBytes 做 UTF-8 字节兜底截断，这里不再需要
@@ -374,7 +402,13 @@ export async function generateSuggestion(
     throw new Error('dsh-suggest-ghost: session has no model-visible transcript to suggest from');
   }
   const route = routeOf(session, config);
-  const language = suggestionLanguage(transcript.pairs);
+  // 语言判定：指定模式直接使用用户选择的语言；自动模式才走加权推断。
+  let language: string;
+  if (languageMode && languageMode !== 'auto') {
+    language = LANGUAGE_NAMES[languageMode] ?? 'English';
+  } else {
+    language = suggestionLanguage(transcript.pairs, uiLocale, uiLocaleWeight, lastLanguage);
+  }
   const system = systemPrompt(config.maxSuggestionChars, language);
   const framed = frameTranscript(transcript.pairs);
   // source：0.1.7 删除了 `plugin` kind（0.1.5 有、0.1.7 无），且 0.1.7 新增的
@@ -424,7 +458,7 @@ export async function generateSuggestion(
       if (cleaned.length === 0 || shouldFilterSuggestion(cleaned)) {
         // 空回复或不合格回复 = 正常「无建议」。归因日志：帮助诊断「这轮怎么没建议」。
         ctx.logger.debug?.(`dsh-suggest-ghost: no usable suggestion (empty/filtered) after ${Date.now() - startedAt}ms on attempt ${attempt}/${maxAttempts} (${route.provider}/${route.model})`);
-        return undefined;
+        return { suggestion: undefined, language };
       }
       const { text: suggestion, truncated } = sanitizeSuggestion(cleaned, config.maxSuggestionChars);
       const suggested: SuggestGhostSuggested = {
@@ -436,7 +470,7 @@ export async function generateSuggestion(
         acceptKey: config.acceptKey ?? 'Tab',
       };
       ctx.logger.debug?.(`dsh-suggest-ghost: suggestion ready in ${Date.now() - startedAt}ms on attempt ${attempt}/${maxAttempts} (${route.provider}/${route.model})`);
-      return suggested;
+      return { suggestion: suggested, language };
     } catch (error) {
       // 外部中止（新回合取代 / 卸载）不重试；最后一次尝试失败则原样抛出。
       if (signal.aborted || attempt >= maxAttempts) throw error;

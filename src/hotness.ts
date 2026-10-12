@@ -45,20 +45,26 @@ export type HotnessChangeHook = (
 export type { HotnessOp } from './domain.js';
 
 /**
- * 按 `seq` 升序的最小堆（lazy-deletion）：pop 时由调用方校验条目是否仍是
- * 当前值（seq 与表内一致），过期的旧版本堆项被丢弃后继续弹。仅用于找
- * 「最近性最差」的淘汰候选，不需要 decrease-key。
+ * 按 `(seq, count)` 字典序升序的最小堆（lazy-deletion）：
+ *  - 第一优先级：`seq` 升序（老的先淘汰）
+ *  - 第二优先级：`count` 升序（同 `seq` 时，低频次先淘汰）
+ *
+ * 恢复条目全部 `seq = -∞`，但按 `count` 升序排列——低频旧消息先走，高频
+ * （如 ×21）保留更久。pop 时由调用方校验条目是否仍是当前值（seq 与表内
+ * 一致），过期的旧版本堆项被丢弃后继续弹。仅用于找「淘汰优先级最高」的
+ * 候选，不需要 decrease-key。
  */
 class MinSeqHeap {
-  private readonly heap: Array<{ readonly text: string; readonly seq: number }> = [];
+  private readonly heap: Array<{ readonly text: string; readonly seq: number; readonly count: number }> = [];
 
-  /** 压入一条（可重复压入同 text 的新 seq 版本；旧版本在 pop 时惰性跳过）。 */
-  push(text: string, seq: number): void {
-    this.heap.push({ text, seq });
+  /** 压入一条（可重复压入同 text 的新版本；旧版本在 pop 时惰性跳过）。 */
+  push(text: string, seq: number, count: number): void {
+    const node = { text, seq, count };
+    this.heap.push(node);
     let i = this.heap.length - 1;
     while (i > 0) {
       const parent = (i - 1) >> 1;
-      if (this.heap[parent]!.seq <= this.heap[i]!.seq) break;
+      if (this.compare(this.heap[parent]!, node) <= 0) break;
       const parentNode = this.heap[parent]!;
       const childNode = this.heap[i]!;
       this.heap[parent] = childNode;
@@ -68,7 +74,8 @@ class MinSeqHeap {
   }
 
   /**
-   * 弹出 seq 最小的堆项；跳过已被 {@link validator} 判为过期的项。
+   * 弹出淘汰优先级最高（(seq, count) 最小）的堆项；跳过已被 {@link validator}
+   * 判为过期的项。
    * @param validator - (text, seq) => boolean；返回 false 的堆项视为陈旧版本，
    * 直接丢弃（它对应的条目要么已删除、要么 lastSeq 已推进到更新的值）。
    */
@@ -84,8 +91,8 @@ class MinSeqHeap {
           const l = 2 * i + 1;
           const r = l + 1;
           let smallest = i;
-          if (l < n && this.heap[l]!.seq < this.heap[smallest]!.seq) smallest = l;
-          if (r < n && this.heap[r]!.seq < this.heap[smallest]!.seq) smallest = r;
+          if (l < n && this.compare(this.heap[l]!, this.heap[smallest]!) < 0) smallest = l;
+          if (r < n && this.compare(this.heap[r]!, this.heap[smallest]!) < 0) smallest = r;
           if (smallest === i) break;
           const smallestNode = this.heap[smallest]!;
           const node = this.heap[i]!;
@@ -97,6 +104,12 @@ class MinSeqHeap {
       if (validator(top.text, top.seq)) return top;
     }
     return undefined;
+  }
+
+  /** 复合比较：先按 seq 升序，同 seq 按 count 升序（低频次优先淘汰）。 */
+  private compare(a: { readonly seq: number; readonly count: number }, b: { readonly seq: number; readonly count: number }): number {
+    if (a.seq !== b.seq) return a.seq - b.seq;
+    return a.count - b.count;
   }
 
   get size(): number {
@@ -134,7 +147,7 @@ export class HotnessTable {
     if (prev === undefined) {
       const entry: HotEntry = { count: 1, lastSeq: seq, pinned: false };
       this.table.set(clean, entry);
-      this.heap.push(clean, seq);
+      this.heap.push(clean, seq, 1);
       // 内存界限：淘汰最近性最差的条目（长驻进程不至于无限增长）。
       if (this.table.size > HOT_TABLE_MAX_ENTRIES) this.evictLeastRecent();
       this.onChange?.(clean, entry);
@@ -145,7 +158,7 @@ export class HotnessTable {
       prev.lastSeq = seq;
       // lazy 更新：新 seq 版本入堆；旧版本在 evict 时经 validator 判过期
       // 惰性丢弃（只保留「seq 与表内当前 lastSeq 一致」的有效版本）。
-      this.heap.push(clean, seq);
+      this.heap.push(clean, seq, prev.count);
     }
     this.onChange?.(clean, prev);
   }
@@ -165,7 +178,7 @@ export class HotnessTable {
     const prev = this.table.get(clean);
     if (prev === undefined) {
       this.table.set(clean, { count, lastSeq: Number.NEGATIVE_INFINITY, pinned });
-      this.heap.push(clean, Number.NEGATIVE_INFINITY);
+      this.heap.push(clean, Number.NEGATIVE_INFINITY, count);
       if (this.table.size > HOT_TABLE_MAX_ENTRIES) this.evictLeastRecent();
       return;
     }
@@ -207,7 +220,7 @@ export class HotnessTable {
     if (prev === undefined) {
       const entry: HotEntry = { count: 1, lastSeq: Number.NEGATIVE_INFINITY, pinned };
       this.table.set(clean, entry);
-      this.heap.push(clean, Number.NEGATIVE_INFINITY);
+      this.heap.push(clean, Number.NEGATIVE_INFINITY, 1);
       if (this.table.size > HOT_TABLE_MAX_ENTRIES) this.evictLeastRecent();
       this.onChange?.(clean, entry);
       return true;
@@ -225,7 +238,12 @@ export class HotnessTable {
     return texts.length;
   }
 
-  /** 淘汰 lastSeq 最小的条目（最久未出现者优先出局）；固定条目豁免。 */
+  /**
+   * 淘汰优先级最高的条目（堆顶 = (seq, count) 最小）：
+   *  - `seq` 最小 → 最久未出现的条目先走
+   *  - 同 `seq`（如恢复条目全为 -∞）→ 低 `count` 先走
+   * 固定条目豁免。
+   */
   private evictLeastRecent(): void {
     const victim = this.heap.popValid((text, seq) => {
       const entry = this.table.get(text);
@@ -244,7 +262,7 @@ export class HotnessTable {
   /** 重建堆，只保留与表内当前 lastSeq 一致的有效版本（O(表大小)）。 */
   private compactHeap(): void {
     const compact = new MinSeqHeap();
-    for (const [text, entry] of this.table) compact.push(text, entry.lastSeq);
+    for (const [text, entry] of this.table) compact.push(text, entry.lastSeq, entry.count);
     this.heap = compact;
   }
 

@@ -246,6 +246,32 @@ console.log('\n【8】产物字节级护栏：检查真正下发的 bundle，而
   const av = bundle.slice(bundle.indexOf('alignAndVerify()'));
   check('alignAndVerify 先写 data-shown 再置 display:block（防重叠窗口）',
     av.indexOf('dataset.shown = "1"') < av.indexOf('style.display = "block"'));
+
+  // 排版属性必须整组照搬：后缀自身的换行要与编辑器一致。实测宿主
+  // `overflow-wrap: anywhere`（可在拉丁词内断行），逐项复制比逐项猜测可靠。
+  const layoutProps = ['overflow-wrap', 'word-break', 'white-space', 'line-height',
+    'letter-spacing', 'word-spacing', 'font-family', 'font-size', 'tab-size'];
+  const missing = layoutProps.filter(p => !bundle.includes(`'${p}'`) && !bundle.includes(`"${p}"`));
+  check('align() 整组照搬排版属性', missing.length === 0, missing.length ? `缺 ${missing.join(', ')}` : '');
+
+  /**
+   * 定位必须锚定到「DOM 量出的草稿行尾」，不得回退到隐形 prefix 撑位。
+   *
+   * 旧设计把位置押在「overlay 自己的排版与编辑器逐像素一致」上，实测该前提会
+   * 瞬时不成立：某一帧 prefix 撑出 0 宽，后缀便从内容原点起画，整条建议压在
+   * 用户草稿上（漂移随草稿长度线性增长 70→84→98px，即 prefix 实际宽度为 0 的
+   * 指纹）。该失效与内容/时序相关，用户无法稳定复现——所以这里既守正向
+   * （锚点实现与自检在场），也守反向（隐形 prefix 不得复活）。
+   */
+  check('历史补全锚定草稿行尾（draftEndRect + anchor-drift 自检在场）',
+    bundle.includes('draftEndRect') && bundle.includes('anchor-drift'));
+  check('caret 越界与陈旧节点有拦截（caret-outside-editor 在场）',
+    bundle.includes('caret-outside-editor'));
+  check('隐形 prefix 撑位不得复活（style.visibility = "hidden" 已移除）',
+    !/style\.visibility\s*=\s*["']hidden["']/.test(bundle));
+  check('自检失败原因写回 DOM 供现场取证（data-reject 在场）',
+    bundle.includes('dataset.reject'));
 }
 
-console.log(`\n结果：${pass} 通过, ${fail} 失败`);process.exit(fail === 0 ? 0 : 1);
+console.log(`\n结果：${pass} 通过, ${fail} 失败`);
+process.exit(fail === 0 ? 0 : 1);

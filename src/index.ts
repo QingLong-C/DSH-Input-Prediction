@@ -41,33 +41,6 @@ import { PROJECTION_KEY } from './domain.js';
 import type { SuggestGhostProjection } from './domain.js';
 
 /**
- * 策略参数：只在插件 Config（`cordis.patch.yml`）里声明，不进 WebUI 表单。
- * 刻意不标 `.volatile()` —— 0.1.7 的 `SettingsForms` 只把 volatile 字段渲染成
- * 表单项（`volatileForm()`），未标的字段留在 profile 文档里由用户手改。
- */
-const StrategyFields = {
-  /** 最终框架化用户提示的最大 UTF-8 字节数。 */
-  maxInputBytes: z.natural().min(1).default(4096),
-  /** 建议生成输出令牌上限（推理模型需留足预算，如 512）。 */
-  maxOutputTokens: z.natural().min(1).default(512),
-  /** 辅助请求端到端截止时间（毫秒）。 */
-  timeoutMs: z.natural().min(1).default(60_000),
-  /** 转录尾部保留的最近完成回合数（默认 1：只取最后一轮）。 */
-  maxRecentTurns: z.natural().min(1).default(1),
-  /** 转录字符预算。 */
-  maxTranscriptChars: z.natural().min(1).default(12_000),
-  /** 建议可见字符上限。 */
-  maxSuggestionChars: z.natural().min(1).default(240),
-  /**
-   * 显式路由对；`z.string().default('')` 而非 `min(1)`：留空表示「继承主请求
-   * 最近记录的路由」。若保持必填，volatile 表单会把插件逼成「不填就不能启动」，
-   * 而继承语义恰恰要求它是可选的。
-   */
-  provider: z.string().default(''),
-  model: z.string().default(''),
-};
-
-/**
  * 用户可调项：逐字段标 `.volatile()`。0.1.7 让字段出现在 WebUI 设置页的开关
  * 就是它 —— `dsh-settings` 的 `volatileForm()` 递归下探、只收 `meta.volatile`
  * 的节点（`Config` 这层对象本身不能标：标了会让整棵子树都变成表单，策略参数
@@ -91,6 +64,25 @@ const StrategyFields = {
  * 放宽到 `^3.18.1` 会让 pnpm 解析出旧版并直接炸掉。
  */
 const EditableFields = {
+  /** 最终框架化用户提示的最大 UTF-8 字节数。 */
+  maxInputBytes: z.natural().min(1).default(4096).volatile(),
+  /** 建议生成输出令牌上限（推理模型需留足预算，如 512）。 */
+  maxOutputTokens: z.natural().min(1).default(512).volatile(),
+  /** 辅助请求端到端截止时间（毫秒）。 */
+  timeoutMs: z.natural().min(1).default(60_000).volatile(),
+  /** 转录尾部保留的最近完成回合数（默认 1：只取最后一轮）。 */
+  maxRecentTurns: z.natural().min(1).default(1).volatile(),
+  /** 转录字符预算。 */
+  maxTranscriptChars: z.natural().min(1).default(12_000).volatile(),
+  /** 建议可见字符上限。 */
+  maxSuggestionChars: z.natural().min(1).default(240).volatile(),
+  /**
+   * 显式路由对；`z.string().default('')` 而非 `min(1)`：留空表示「继承主请求
+   * 最近记录的路由」。若保持必填，volatile 表单会把插件逼成「不填就不能启动」，
+   * 而继承语义恰恰要求它是可选的。
+   */
+  provider: z.string().default('').volatile(),
+  model: z.string().default('').volatile(),
   /** LLM 下一条建议开关（默认开）；关闭后每回合不再调用建议模型。 */
   llmEnabled: z.boolean().default(true).volatile(),
   /** 是否启用历史前缀补全。 */
@@ -105,6 +97,17 @@ const EditableFields = {
   wordAccept: z.boolean().default(true).volatile(),
   /** 采纳建议的输入框快捷键（默认 Tab）。 */
   acceptKey: z.string().min(1).default('Tab').volatile(),
+  /**
+   * 建议语言模式：'auto' = 自动推断（结合 UI 语言 + 用户消息文字分布）；
+   * 'zh' / 'zh-TW' / 'en' / 'ja' / 'ko' / 'ru' / 'fr' / 'de' / 'es' = 强制指定语言。
+   * 未知代码在 host 端回退 English（见 generate.ts 的 LANGUAGE_NAMES）。
+   */
+  languageMode: z.string().default('auto').volatile(),
+  /**
+   * UI 语言先验权重（仅 auto 模式生效）：值越大越倾向 UI 语言。
+   * 默认 100 ≈ 2-3 条中等长度消息的置信度。
+   */
+  uiLocaleWeight: z.natural().min(0).default(100).volatile(),
   /**
    * client → host 的热度管理操作队列（JSON 字符串）。
    *
@@ -137,14 +140,14 @@ const EditableFields = {
  * 读值一律走 `flattenConfig()` 的 `readVolatile()`，拿到的才是裸值。
  */
 export interface PluginConfigValues {
-  maxInputBytes: number;
-  maxOutputTokens: number;
-  timeoutMs: number;
-  maxRecentTurns: number;
-  maxTranscriptChars: number;
-  maxSuggestionChars: number;
-  provider: string;
-  model: string;
+  maxInputBytes: Volatile<number>;
+  maxOutputTokens: Volatile<number>;
+  timeoutMs: Volatile<number>;
+  maxRecentTurns: Volatile<number>;
+  maxTranscriptChars: Volatile<number>;
+  maxSuggestionChars: Volatile<number>;
+  provider: Volatile<string>;
+  model: Volatile<string>;
   llmEnabled: Volatile<boolean>;
   historyEnabled: Volatile<boolean>;
   historyCrossSession: Volatile<boolean>;
@@ -152,6 +155,8 @@ export interface PluginConfigValues {
   historyMinChars: Volatile<number>;
   wordAccept: Volatile<boolean>;
   acceptKey: Volatile<string>;
+  languageMode: Volatile<string>;
+  uiLocaleWeight: Volatile<number>;
   _ops: Volatile<string>;
   _push: Volatile<string>;
 }
@@ -165,7 +170,6 @@ export interface PluginConfigValues {
  * 对不上而报 TS2322。输入形状用 `Schemastery.TypeS<typeof ConfigSchema>` 取回。
  */
 const ConfigSchema = z.object({
-  ...StrategyFields,
   ...EditableFields,
 });
 
@@ -183,6 +187,8 @@ interface SessionState {
   lastSuggestedTurn: number;
   /** 在途生成；新回合会中止旧生成。 */
   pending: { readonly turn: number; readonly controller: AbortController } | undefined;
+  /** 上次建议的语言（语言惯性：短消息无足够信号时回退）。 */
+  lastLanguage: string | undefined;
 }
 
 /** 从会话日志恢复已建议的最新回合号。 */
@@ -224,6 +230,11 @@ export function apply(ctx: Context, config: GenerateConfig): void {
    * 换引用，载荷比对才是语义判重）。
    */
   let lastOpsPayload = EMPTY_PUSH;
+  /**
+   * client 最后一次 `_ops` 写入捎带的 UI 语言（'zh' | 'en'）。
+   * host 重启后为空，client 下次 pull 会重新捎带；语言检测时作为先验加成。
+   */
+  let clientUiLocale: string | undefined;
   /** 取当前 `_ops` 的载荷字符串（读 volatile 引用；裸值形态则直接用）。 */
   const readOps = (): string => {
     const ref = (resolved as { _ops?: unknown })._ops;
@@ -492,14 +503,18 @@ export function apply(ctx: Context, config: GenerateConfig): void {
 
   /**
    * `_ops` 消费器（watch 触发与启动遗留补消费共用）：pull 走统一的状态组装应答，
-   * 其余操作交热表层应用（幂等），最后 flush 并清空队列。
-   * @param ops - 已解析的操作批；空数组直接返回（不写盘）。
+   * 其余操作交热表层应用（幂等），最后 flush 并清空队列。捎带的 locale 更新到
+   * 模块变量，供后续语言检测使用。
+   * @param parsed - 已解析的操作批 + 可选 locale；空 ops 直接返回（不写盘）。
    * @param svc - settings 写面，用于消费后清空 `_ops`。
    */
   const consumeOps = (
-    ops: readonly HotnessOp[],
+    parsed: { readonly ops: readonly HotnessOp[]; readonly locale?: string },
     svc: { update: (ns: unknown, patch: object) => Promise<void> },
   ): void => {
+    // 捎带的 UI 语言：有则更新（last-wins），无则保持上次值。
+    if (parsed.locale !== undefined) clientUiLocale = parsed.locale;
+    const ops = parsed.ops;
     if (ops.length === 0) return;
     for (const op of ops) {
       if (op.op !== 'pull') continue;
@@ -523,7 +538,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     void persistence.flush();
     let state = states.get(session);
     if (state === undefined) {
-      state = { lastSuggestedTurn: lastSuggestedTurnInLog(session), pending: undefined };
+      state = { lastSuggestedTurn: lastSuggestedTurnInLog(session), pending: undefined, lastLanguage: undefined };
       states.set(session, state);
       tracked.add(state);
     }
@@ -553,20 +568,28 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     const controller = new AbortController();
     state.pending = { turn, controller };
     void Promise.resolve()
-      .then(() => generateSuggestion(ctx, effective(), session, turn, controller.signal))
+      .then(() => {
+        const cfg = effective();
+        return generateSuggestion(
+          ctx, cfg, session, turn, controller.signal,
+          clientUiLocale, cfg.languageMode, cfg.uiLocaleWeight,
+          state.lastLanguage,
+        );
+      })
       .then(
-        (suggestion) => {
+        (result) => {
           if (state?.pending?.controller !== controller) return;
           state.pending = undefined;
           state.lastSuggestedTurn = turn;
+          state.lastLanguage = result.language;
           // 经 settings 实时推给 client（不写日志）。热度快照始终附带：
           // 其频次参与历史补全打分（新近度为主、频次为辅）；「跨会话搜索」
           // 开关仅在 client 端决定是否把这些文本并作候选。历史环随推：client
           // 端补全的文本源（0.1.2 会话快照已不对插件暴露对话 nodes）。
           const hot = hotness.snapshot(liveSettings.historyMaxEntries);
-          trackSuggestion(session.id, suggestion ?? null);
+          trackSuggestion(session.id, result.suggestion ?? null);
           pushToClient({
-            suggestion: suggestion ?? null,
+            suggestion: result.suggestion ?? null,
             suggestionSessionId: session.id,
             hot,
             total: hotness.size,

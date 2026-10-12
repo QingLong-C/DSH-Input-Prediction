@@ -41,6 +41,8 @@ export interface EditableConfig {
     historyMinChars?: Volatile<number> | number;
     wordAccept?: Volatile<boolean> | boolean;
     acceptKey?: Volatile<string> | string;
+    languageMode?: Volatile<string> | string;
+    uiLocaleWeight?: Volatile<number> | number;
 }
 /** 内核解析后的插件配置：策略字段是裸值，可调字段是引用。 */
 export type ResolvedPluginConfig = Config & EditableConfig;
@@ -53,6 +55,8 @@ export type FlatConfig = Config & {
     historyMinChars: number;
     wordAccept: boolean;
     acceptKey: string;
+    languageMode: string;
+    uiLocaleWeight: number;
 };
 /**
  * 把插件配置拍平成「策略 + 可调」的裸值视图。0.1.7 的可调项是引用，其余代码
@@ -78,5 +82,8 @@ export declare function buildTranscript(session: Session, maxRecentTurns: number
  * 而建议调用是单发——不稳定窗口里会整轮静默失败（实测发生过）。被外部
  * 中止（新回合取代/卸载）时不重试。
  */
-export declare function generateSuggestion(ctx: Context, config: Config, session: Session, turn: number, signal: AbortSignal): Promise<SuggestGhostSuggested | undefined>;
+export declare function generateSuggestion(ctx: Context, config: Config, session: Session, turn: number, signal: AbortSignal, uiLocale?: string, languageMode?: string, uiLocaleWeight?: number, lastLanguage?: string): Promise<{
+    suggestion: SuggestGhostSuggested | undefined;
+    language: string;
+}>;
 export { PROJECTION_KEY };

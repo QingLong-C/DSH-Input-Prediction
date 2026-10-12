@@ -437,18 +437,61 @@ class GhostOverlay {
     const borderTop = parseFloat(style.borderTopWidth) || 0;
     // 内容起点 = 编辑器在 offsetParent（.grow）内的偏移 + border + padding。
     // offsetTop/offsetLeft 与滚动无关，正是「内容坐标系」里的正确坐标。
-    this.el.style.left = `${ta.offsetLeft + borderLeft + padLeft}px`;
-    this.el.style.top = `${ta.offsetTop + borderTop + padTop}px`;
+    const originLeft = ta.offsetLeft + borderLeft + padLeft;
+    const originTop = ta.offsetTop + borderTop + padTop;
     // 宽度：编辑器内容宽 = clientWidth - 左右 padding（border-box 下 clientWidth
     // 已含 padding、不含 border）。
-    const width = ta.clientWidth - padLeft - padRight;
-    this.el.style.width = `${width > 0 ? width : ta.clientWidth}px`;
-    // 继承输入区字体与行高，保证幽灵文本视觉一致。
-    this.el.style.fontFamily = style.fontFamily;
-    this.el.style.fontSize = style.fontSize;
-    this.el.style.lineHeight = style.lineHeight;
-    this.el.style.fontWeight = style.fontWeight;
-    this.el.style.letterSpacing = style.letterSpacing;
+    const fullWidth = ta.clientWidth - padLeft - padRight;
+    let left = originLeft;
+    let top = originTop;
+    let width = fullWidth > 0 ? fullWidth : ta.clientWidth;
+
+    // ── 历史补全：锚定到「DOM 量出的草稿行尾」，而非靠隐形 prefix 撑位 ─────────
+    // 视口坐标下的内容原点，与 originLeft/originTop 是同一位置的不同坐标系；
+    // 两者之差把 caret 的视口位置换算成 offsetParent 坐标系里的位移。
+    const taRect = ta.getBoundingClientRect();
+    const originViewportX = taRect.left + borderLeft + padLeft;
+    const originViewportY = taRect.top + borderTop + padTop;
+    const end = this.current !== null && this.current.kind === 'history'
+      ? this.draftEndRect()
+      : null;
+    if (end !== null) {
+      left = originLeft + (end.right - originViewportX);
+      // `end` 是末字符矩形：其 top 是**文本顶部**（字形墨迹上缘），不是行框顶部。
+      // overlay 的 top 定位的是行框顶部，而 overlay 内文本会在 line-height 行框里
+      // 垂直居中——若直接用 end.top 对齐行框顶，幽灵文本会比正文低
+      // (lineHeight - 字高)/2（本例 ≈2px，正是用户报的"高度不一致"）。
+      // 所以要把这段行内偏移扣掉，让 overlay 的**文本**与正文的**文本**同高。
+      const lineHeight = parseFloat(style.lineHeight);
+      const lineOffset = Number.isFinite(lineHeight) && lineHeight > 0 && end.height > 0
+        ? Math.max(0, (lineHeight - end.height) / 2)
+        : 0;
+      top = originTop + (end.top - originViewportY) - lineOffset;
+      // 后缀只能在「行尾到行末」这段空间里换行，与编辑器继续输入时的行为一致。
+      width = Math.max(0, fullWidth - (left - originLeft));
+    }
+    this.el.style.left = `${left}px`;
+    this.el.style.top = `${top}px`;
+    this.el.style.width = `${width}px`;
+    // ── 文本排版属性整组照搬 ───────────────────────────────────────────────
+    // 位置已不依赖排版，但后缀**自身**的换行仍需与编辑器一致（否则长建议会溢出
+    // 到错误的位置）。宿主 `overflow-wrap: anywhere` 可在拉丁词内断行，逐项复制
+    // 比逐项猜测可靠。
+    const TEXT_LAYOUT_PROPS = [
+      'font-family', 'font-size', 'font-style', 'font-variant', 'font-weight', 'font-stretch',
+      'font-feature-settings', 'font-kerning',
+      'font-variant-ligatures', 'font-variant-east-asian',
+      'font-variant-caps', 'font-variant-numeric', 'font-variant-alternates', 'font-variant-position',
+      'font-size-adjust', 'font-synthesis', 'font-optical-sizing',
+      'line-height', 'letter-spacing', 'word-spacing',
+      'white-space', 'overflow-wrap', 'word-break', 'tab-size', 'text-indent',
+      'direction', 'writing-mode',
+      'text-rendering', 'text-size-adjust', '-webkit-text-size-adjust',
+      '-webkit-font-smoothing', '-moz-osx-font-smoothing',
+    ] as const;
+    for (const prop of TEXT_LAYOUT_PROPS) {
+      this.el.style.setProperty(prop, style.getPropertyValue(prop));
+    }
     this.el.style.boxSizing = 'border-box';
   }
 
@@ -469,6 +512,52 @@ class GhostOverlay {
    * 判据：幽灵左上角与「编辑器在 offsetParent 内的内容原点」之差必须在一个
    * 行高量级内。偏差超过一行，说明坐标系假设已被宿主破坏，放弃显示。
    */
+  /**
+   * 量出草稿在编辑器里的**真实行尾**（最后一行最后一个字符之后的位置）。
+   *
+   * 必须逐文本节点取、且只取**最后一个非空文本节点的末字符**矩形：
+   * `range.selectNodeContents(editor)` 返回的是**块级 `<p>` 的整行矩形**，
+   * 多行时其 `right` 是第一行的行尾——拿它当"草稿末尾"会算出几百像素的假重叠
+   * （本仓库实测踩过两次）。
+   */
+  private draftEndRect(): DOMRect | null {
+    const ta = this.composer;
+    if (ta === null) return null;
+    const walker = document.createTreeWalker(ta, NodeFilter.SHOW_TEXT);
+    let last: Text | null = null;
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      const text = node as Text;
+      if (text.nodeValue && text.nodeValue.length > 0) last = text;
+    }
+    if (last === null) return null;
+    const end = last.nodeValue.length;
+    const range = document.createRange();
+    range.setStart(last, Math.max(0, end - 1));
+    range.setEnd(last, end);
+    const rect = range.getBoundingClientRect();
+    // 行尾是空白字符时矩形宽度可能为 0，但 left/right 仍有位置意义。
+    return rect.width > 0 || rect.height > 0 ? rect : null;
+  }
+
+  /** 记录一次自检失败的原因（留在 `data-reject` 上供现场取证）并判为不显示。 */
+  private rejectAs(reason: string): false {
+    this.el.dataset.reject = reason;
+    return false;
+  }
+
+  /**
+   * 几何自检：定位明显失真时宁可不显示，也绝不糊在正文上。
+   *
+   * ## 两种形态判据不同（历史补全已改为锚定，不再检查原点）
+   *
+   *  - **历史补全**：幽灵的左上角必须正好落在 DOM 量出的草稿行尾（±4px）。
+   *    另外要求 caret 本身落在编辑器自己的盒子里——这是为了拦住「量到游离/陈旧
+   *    节点」的情形：游离节点的矩形是**全 0**，若不拦，锚点会被算到屏幕左上角。
+   *  - **LLM 建议**（草稿为空、整段从内容原点起）：仍按原点判据，并额外确认
+   *    占位文字**确实已让位**——否则幽灵就是叠在占位文案上（用户第一张截图）。
+   *
+   * 失败原因写进 `data-reject`：把「偶发重叠」变成「偶发没幽灵 + 一条可读证据」。
+   */
   private verify(): boolean {
     const ta = this.composer;
     if (ta === null) return false;
@@ -476,20 +565,44 @@ class GhostOverlay {
     if (!(host instanceof HTMLElement)) return false;
     // 调用方已保证此刻元素是 `display:block`（见 alignAndVerify），此处 rect 可信。
     const ghostRect = this.el.getBoundingClientRect();
-    // 期望位置：编辑器内容原点在视口中的坐标。
-    const expectedTop = ta.getBoundingClientRect().top
-      + (parseFloat(getComputedStyle(ta).paddingTop) || 0);
-    // 实际位置与期望位置之差；一行高度（约 24px）以内的偏差无害，超过即失真。
-    const drift = Math.abs(ghostRect.top - expectedTop);
-    const lineHeight = parseFloat(getComputedStyle(ta).lineHeight);
+    const taRect = ta.getBoundingClientRect();
+    const style = getComputedStyle(ta);
+    const padLeft = parseFloat(style.paddingLeft) || 0;
+    const padTop = parseFloat(style.paddingTop) || 0;
+    const borderLeft = parseFloat(style.borderLeftWidth) || 0;
+    const borderTop = parseFloat(style.borderTopWidth) || 0;
+    const lineHeight = parseFloat(style.lineHeight);
     const tolerance = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 24;
-    if (drift > tolerance) return false;
-    // 水平方向同理：允许一个字宽量级的偏差。
-    const expectedLeft = ta.getBoundingClientRect().left
-      + (parseFloat(getComputedStyle(ta).paddingLeft) || 0);
-    if (Math.abs(ghostRect.left - expectedLeft) > tolerance) return false;
+
+    if (this.current !== null && this.current.kind === 'history') {
+      const end = this.draftEndRect();
+      if (end === null) return this.rejectAs('no-caret');
+      if (end.right < taRect.left || end.right > taRect.right + 1
+        || end.top < taRect.top - 1 || end.top > taRect.bottom + 1) {
+        return this.rejectAs('caret-outside-editor');
+      }
+      const dx = Math.round(ghostRect.left - end.right);
+      // overlay 顶被刻意上移了行内偏移（让 overlay 内文本与正文字形同高），
+      // 所以 overlay.top ≈ end.top - lineOffset，dy 会是一个约 -2px 的负值——
+      // 允许 [-(lineHeight-end.height)/2 - 4, +4] 区间，仍拦住真正的坐标系错位。
+      const lineOff = Number.isFinite(lineHeight) && lineHeight > 0 && end.height > 0
+        ? Math.max(0, (lineHeight - end.height) / 2) : 0;
+      const dy = Math.round(ghostRect.top - end.top);
+      if (Math.abs(dx) > 4 || dy > 4 || dy < -(lineOff + 4)) {
+        return this.rejectAs(`anchor-drift dx=${dx} dy=${dy}`);
+      }
+    } else {
+      if (Math.abs(ghostRect.top - (taRect.top + borderTop + padTop)) > tolerance) return this.rejectAs('origin-drift-y');
+      if (Math.abs(ghostRect.left - (taRect.left + borderLeft + padLeft)) > tolerance) return this.rejectAs('origin-drift-x');
+      const placeholder = document.querySelector('[data-composer-placeholder]');
+      if (placeholder !== null && getComputedStyle(placeholder).display !== 'none') {
+        return this.rejectAs('placeholder-visible');
+      }
+    }
     // host 必须仍包含编辑器（否则 overlay 挂在了不相干的层上）。
-    return host.contains(ta) || host === ta.parentElement;
+    if (!(host.contains(ta) || host === ta.parentElement)) return this.rejectAs('host-mismatch');
+    delete this.el.dataset.reject;
+    return true;
   }
 
   /**
@@ -535,13 +648,13 @@ class GhostOverlay {
     if (content.kind === 'llm') {
       this.el.textContent = content.text;
     } else {
-      // 历史补全：已输入前缀用透明占位（宽度自然对齐），剩余部分灰色显示。
-      const prefix = document.createElement('span');
-      prefix.style.visibility = 'hidden';
-      prefix.textContent = content.prefix;
+      // 只渲染后缀。**不再**用「隐形 prefix 撑出草稿宽度」定位——那要求 overlay
+      // 自己的排版与编辑器逐像素一致，一旦某帧不成立（实测：prefix 撑出 0 宽），
+      // 后缀就从内容原点起画，直接压在用户草稿上。位置改由 align() 用 DOM 量出的
+      // 草稿行尾锚定，与本元素的排版完全解耦。
       const suffix = document.createElement('span');
       suffix.textContent = content.suffix;
-      this.el.append(prefix, suffix);
+      this.el.append(suffix);
     }
     this.current = content;
     // 先按当前几何定位，再由自检决定是否真的绘制（防止第一帧就糊在正文上）。
@@ -553,6 +666,7 @@ class GhostOverlay {
     this.el.style.display = 'none';
     this.el.textContent = '';
     this.el.dataset.shown = '0';
+    delete this.el.dataset.reject;
   }
 
   dispose(): void {
@@ -803,18 +917,37 @@ function applyBody(ctx: Context): void {
   // 注意：必须放在 render 等函数定义之后，否则同步调用 applySettings 会触发
   // const 函数声明前的 TDZ（原 rc.6 版靠 ctx.inject 的异步延迟规避，rc.7 下
   // 需要显式保证顺序）。
+
+  // UI 语言服务（可选）：每次写 _ops 时捎带给 host，供语言检测做先验加成。
+  const locale = ctx.get('locale') as LocaleFaceLike | undefined;
+
   /**
    * `_ops` 反向通道的写面（经 `remote.settings.mutate` 请求 host 推送历史环）。
    *
    * 0.1.7 里 `settingsScope.set` 已随 settings.yaml 体系退役；改写 volatile
    * 配置字段走 `remote.settings.mutate(ns, [{op:'set', path:['_ops'], value}])`。
    * mutate 失败（后端未就绪/命名空间暂不可见）时返回 false，调用方按未送达处理。
+   *
+   * 每次写入自动捎带当前 UI 语言（`locale` 字段），host 据此做语言先验加成。
    */
   const writeOps = (payload: string): Promise<boolean> => {
     const svc = remoteOf(ctx)?.settings;
     if (svc === undefined) return Promise.resolve(false);
+    // 捎带 UI 语言：解析 payload 并注入 locale 字段（如果 payload 是合法 JSON 对象）
+    let enriched = payload;
+    try {
+      const obj = JSON.parse(payload);
+      if (obj !== null && typeof obj === 'object' && !Array.isArray(obj)) {
+        const active = locale?.getSnapshot?.()?.active;
+        if (typeof active === 'string' && active.length > 0) {
+          enriched = JSON.stringify({ ...obj, locale: active });
+        }
+      }
+    } catch {
+      // payload 非 JSON，原样发送
+    }
     return svc
-      .mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['_ops'], value: payload }])
+      .mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['_ops'], value: enriched }])
       .then(() => true)
       .catch(() => false);
   };
@@ -1134,8 +1267,6 @@ function applyBody(ctx: Context): void {
   // `label` 传 thunk：宿主每次投影都会重读，语言切换后无需重新注册。文案走本文件
   // 的 SECTION_LABELS + locale 快照（`sectionLabel()`），不依赖 locale/ 资源文件
   // ——`settings.section` 的 `label` 是普通函数，不是内核 locale 目录查找。
-
-  const locale = ctx.get('locale') as LocaleFaceLike | undefined;
 
   // 插件详情页卡片（0.1.7+ / 0.2.0+）：configForms 表单 + `plugins.bundle.config` 卡片。
   // 寻址键是条目 id（`cordis.patch.yml` 的 `id: suggest-ghost`），不是 settings namespace。

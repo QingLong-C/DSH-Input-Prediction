@@ -39,5 +39,7 @@ export function useGhostT(locale: LocaleFaceLike | undefined): GhostLang {
     [locale],
   );
   const active = useSyncExternalStore(subscribe, getActive, getActive);
-  return active === 'en' ? 'en' : 'zh';
+  if (active === 'en') return 'en';
+  if (active?.startsWith('zh')) return 'zh';
+  return 'zh';
 }

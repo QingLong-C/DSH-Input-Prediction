@@ -22,6 +22,8 @@ import { HotnessTable } from './hotness.js';
 export interface HotnessOpsPayload {
     readonly rev: number;
     readonly ops: readonly HotnessOp[];
+    /** client 的 UI 语言（'zh' | 'en'）；捎带在每次 _ops 写入中，host 据此做语言先验。 */
+    readonly locale?: string;
 }
 /** 持久化句柄：index.ts 在回合结束时调用 flush，卸载时 close 兜底。 */
 export interface HotnessPersistence {
@@ -54,8 +56,13 @@ export declare function setupHotnessPersistence(ctx: Context): {
     hotness: HotnessTable;
     persistence: HotnessPersistence;
 };
+/** `_ops` 解析结果：操作批 + 可选的 UI 语言。 */
+export interface ParsedOpsResult {
+    readonly ops: readonly HotnessOp[];
+    readonly locale?: string;
+}
 /**
- * 解析 client 写入 `_ops` 的 JSON 载荷：非法/空载荷返回空数组（调用方据此
+ * 解析 client 写入 `_ops` 的 JSON 载荷：非法/空载荷返回空结果（调用方据此
  * 跳过消费）。上限防御：单批操作数最多 1000（防畸形巨载荷拖住写链）。
  */
-export declare function parseHotnessOps(raw: string | undefined): readonly HotnessOp[];
+export declare function parseHotnessOps(raw: string | undefined): ParsedOpsResult;

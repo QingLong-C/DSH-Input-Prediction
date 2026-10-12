@@ -104,23 +104,171 @@ export function trimTranscript(
   };
 }
 
-/** 建议回复语言跟随会话（最后一条用户消息的文字系统）。 */
-export function suggestionLanguage(pairs: readonly TranscriptPair[]): string {
-  for (const pair of [...pairs].reverse()) {
-    if (pair.role !== 'user') continue;
-    if (hasCJK(pair.text)) return '简体中文';
-    if (hasCyrillic(pair.text)) return 'Russian';
-    return 'the same language the user wrote their last message in';
+/**
+ * 去噪：移除代码块、行内代码、URL、常见路径与文件名，保留自然语言文本。
+ * 语言推断前调用，避免代码/路径里的 CJK 字符误导判断。
+ */
+function stripNoise(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')          // fenced 代码块
+    .replace(/`[^`\n]+`/g, ' ')                // 行内代码
+    .replace(/https?:\/\/\S+/g, ' ')           // URL
+    .replace(/\b[a-zA-Z]:[\\/][\w.\\/-]+/g, ' ') // Windows 绝对路径
+    .replace(/\b(?:src|lib|test|tests|docs|node_modules|dist|build)[\\/][\w./-]+/g, ' ') // 常见项目路径
+    .replace(/\b\w+\.\w{2,4}\b/g, ' ')         // 文件名（含扩展名）
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** 统计文本中各文字系统的字符数（按码点遍历，代理对安全）。 */
+function countScripts(text: string): { cjk: number; cyrillic: number; latin: number } {
+  let cjk = 0;
+  let cyrillic = 0;
+  let latin = 0;
+  for (const ch of text) {
+    const code = ch.codePointAt(0)!;
+    if ((code >= 0x3040 && code <= 0x30ff) ||   // 假名
+        (code >= 0x3400 && code <= 0x4dbf) ||   // CJK 扩展 A
+        (code >= 0x4e00 && code <= 0x9fff) ||   // CJK 基本
+        (code >= 0xf900 && code <= 0xfaff)) {   // CJK 兼容
+      cjk += 1;
+    } else if (code >= 0x0400 && code <= 0x04ff) { // 西里尔
+      cyrillic += 1;
+    } else if ((code >= 0x0041 && code <= 0x005a) ||
+               (code >= 0x0061 && code <= 0x007a)) { // 拉丁字母
+      latin += 1;
+    }
   }
+  return { cjk, cyrillic, latin };
+}
+
+/**
+ * 建议回复语言：结合 UI 界面语言与最近用户消息的文字系统分布加权推断。
+ *
+ * 设计要点：
+ * 1. UI 语言作为先验加成（权重可配置，默认约等于 2-3 条中等长度消息）——界面语言是用户
+ *    显式选择的交互语言，弱证据下优先遵循；
+ * 2. 用户消息按「比例 × 长度 × 时间」加权，强证据可推翻 UI 先验；
+ * 3. 取最近 20 条用户消息，去噪后再统计，避免代码/路径里的 CJK 字符误导；
+ * 4. 用户消息全为代码时回退到最近一条 assistant 消息的语言。
+ *
+ * @param pairs - 转录对
+ * @param uiLocale - client 捎带的 UI 语言（'zh' | 'en' | 'ru' 等）
+ * @param uiLocaleWeight - UI 语言先验权重（默认 100；越大越倾向 UI 语言）
+ * @param lastLanguage - 上次建议的语言（语言惯性：短消息无足够信号时回退）
+ */
+export function suggestionLanguage(
+  pairs: readonly TranscriptPair[],
+  uiLocale?: string,
+  uiLocaleWeight: number = 100,
+  lastLanguage?: string,
+): string {
+  // 收集最近 20 条用户消息
+  const MAX_MESSAGES = 20;
+  const recentUser: string[] = [];
+  for (const pair of [...pairs].reverse()) {
+    if (pair.role === 'user') {
+      recentUser.push(pair.text);
+      if (recentUser.length >= MAX_MESSAGES) break;
+    }
+  }
+
+  // 无用户消息 → 回退到最近一条 assistant 消息
+  if (recentUser.length === 0) {
+    for (const pair of [...pairs].reverse()) {
+      if (pair.role === 'assistant') {
+        recentUser.push(pair.text);
+        break;
+      }
+    }
+  }
+
+  if (recentUser.length === 0) return 'English';
+
+  // 去噪后若所有用户消息都为空（全是代码/路径），回退到最近一条 assistant 消息
+  const cleanedUser = recentUser.map(stripNoise).filter(s => s.length > 0);
+  if (cleanedUser.length === 0) {
+    recentUser.length = 0;
+    for (const pair of [...pairs].reverse()) {
+      if (pair.role === 'assistant') {
+        recentUser.push(pair.text);
+        break;
+      }
+    }
+    if (recentUser.length === 0) return 'English';
+  }
+
+  // 加权累计各文字系统得分（比例 × 长度 × 时间）
+  let cjkScore = 0;
+  let cyrillicScore = 0;
+  let latinScore = 0;
+
+  const sources = recentUser.length > 0 && cleanedUser.length === 0
+    ? recentUser  // 回退到 assistant，用原始文本
+    : cleanedUser; // 正常情况用去噪后的文本
+
+  const N = sources.length;
+  // 归一化时间权重：总和恒为 6（与 3 条消息时的 (3,2,1) 一致），
+  // 保证 UI 先验校准不随消息数量漂移。
+  const totalRawWeight = N * (N + 1) / 2;
+  const weightScale = 6 / totalRawWeight;
+
+  for (let i = 0; i < N; i++) {
+    const text = sources[i]!;
+    // 时间权重：归一化后 newest ≈ 3×weightScale, oldest ≈ 1×weightScale
+    const recencyWeight = (N - i) * weightScale;
+    const { cjk, cyrillic, latin } = countScripts(text);
+    const letters = cjk + cyrillic + latin;
+    if (letters === 0) continue;
+    // 长度权重：封顶 60 字母，避免单条主导
+    const size = Math.min(letters, 60);
+    // 比例权重：该文字系统占总字母数的比例
+    const cjkRatio = cjk / letters;
+    const cyrillicRatio = cyrillic / letters;
+    const latinRatio = latin / letters;
+    cjkScore += cjkRatio * size * recencyWeight;
+    cyrillicScore += cyrillicRatio * size * recencyWeight;
+    latinScore += latinRatio * size * recencyWeight;
+  }
+
+  // UI 语言先验加成：界面语言是用户显式选择的交互语言，
+  // 权重可配置（默认 100 ≈ 2-3 条中等长度消息的置信度）；
+  // 用户消息证据更强时可推翻。仅对非英语 UI 加成（英语是默认回退）。
+  const hasUiPrior = uiLocale === 'zh' || uiLocale === 'ru';
+  if (uiLocale === 'zh') {
+    cjkScore += uiLocaleWeight;
+  } else if (uiLocale === 'ru') {
+    cyrillicScore += uiLocaleWeight;
+  }
+
+  // 语言判定：
+  // - 无 UI 先验时：CJK/西里尔证据足够 → 对应语言；否则 → English
+  // - 有 UI 先验时：CJK/西里尔证据领先拉丁 → 对应语言；
+  //   拉丁证据超过 UI 先验 → English（用户持续使用英语推翻 UI）；
+  //   否则 → UI 语言（先验压制短英文消息）
+  if (cjkScore >= 6 && cjkScore >= cyrillicScore) {
+    // CJK 证据足够；有 UI 先验时需同时领先拉丁（否则用户持续英文推翻）
+    if (!hasUiPrior || cjkScore >= latinScore) return '简体中文';
+  }
+  if (cyrillicScore >= 6 && cyrillicScore > cjkScore) {
+    if (!hasUiPrior || cyrillicScore >= latinScore) return 'Russian';
+  }
+
+  // 语言惯性：最近消息太短/无足够信号时，回退到上次建议的语言
+  // （避免俄语用户 + en UI + 短消息 "ok"/"1" 被误判为 English）
+  if (lastLanguage && lastLanguage !== 'English' && cjkScore < 6 && cyrillicScore < 6) {
+    return lastLanguage;
+  }
+
   return 'English';
 }
 
-/** 检测文本是否含中日韩字符（决定建议回复语言）。 */
+/** 检测文本是否含中日韩字符（决定建议回复语言）。@deprecated 保留给外部调用者，内部已改用 countScripts。 */
 export function hasCJK(text: string): boolean {
   return /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/.test(text);
 }
 
-/** 检测文本是否含西里尔字母（俄语等）。 */
+/** 检测文本是否含西里尔字母（俄语等）。@deprecated 保留给外部调用者，内部已改用 countScripts。 */
 export function hasCyrillic(text: string): boolean {
   return /[\u0400-\u04ff]/.test(text);
 }

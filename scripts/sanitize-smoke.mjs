@@ -72,17 +72,114 @@ assert.equal(hasCyrillic('Создай файл'), true); // 俄语
 assert.equal(hasCyrillic('Привет мир'), true); // 俄语
 assert.equal(hasCyrillic('hello 中文'), false);
 
-// —— 建议语言推断（GitHub #1：俄语等非 CJK 文字不应回退到 English） ——
+// —— 建议语言推断（多消息加权 + 去噪 + 回退链） ——
+// 基础：单条中文 → 简体中文
 assert.equal(suggestionLanguage([{ role: 'user', text: '帮我写个函数' }]), '简体中文');
+// 基础：单条俄语 → Russian
 assert.equal(suggestionLanguage([{ role: 'user', text: 'Создай файл hello.txt' }]), 'Russian');
-assert.equal(suggestionLanguage([{ role: 'user', text: 'write a function' }]), 'the same language the user wrote their last message in');
-// 多轮：取最后一条 user 消息
+// 基础：纯英文 → English（旧版返回模糊描述，新版返回具体语言）
+assert.equal(suggestionLanguage([{ role: 'user', text: 'write a function' }]), 'English');
+// 去噪：代码块里的中文不计入
+assert.equal(suggestionLanguage([{ role: 'user', text: 'fix this:\n```ts\nconst 中文变量 = 1\n```' }]), 'English');
+// 去噪：URL / 路径里的中文不计入
+assert.equal(suggestionLanguage([{ role: 'user', text: 'check https://example.com/中文路径 and src/utils.ts' }]), 'English');
+// 混合：自然语言里有足够中文 → 简体中文
+assert.equal(suggestionLanguage([{ role: 'user', text: 'check src/utils.ts 这个文件的逻辑' }]), '简体中文');
+// 多轮：最近消息主导（最后一条中文权重最高）
+assert.equal(suggestionLanguage([
+  { role: 'user', text: 'write a function' },
+  { role: 'assistant', text: 'sure' },
+  { role: 'user', text: '帮我改一下' },
+]), '简体中文');
+// 多轮：最近消息是俄语 → Russian
 assert.equal(suggestionLanguage([
   { role: 'user', text: 'write a function' },
   { role: 'assistant', text: 'sure' },
   { role: 'user', text: 'Создай файл' },
 ]), 'Russian');
-// 空 pairs 回退 English
+// 回退：用户消息全是代码 → 看 assistant 消息
+assert.equal(suggestionLanguage([
+  { role: 'user', text: '```ts\nconst x = 1\n```' },
+  { role: 'assistant', text: '好的，我来帮你看看这个函数' },
+]), '简体中文');
+// 空 pairs → English
 assert.equal(suggestionLanguage([]), 'English');
+// 短消息 "ok" 不足以覆盖后续中文消息
+assert.equal(suggestionLanguage([
+  { role: 'user', text: 'ok' },
+  { role: 'assistant', text: 'done' },
+  { role: 'user', text: '再帮我检查一下测试' },
+]), '简体中文');
+
+// —— UI 语言先验加成 ——
+// zh UI + 单条英文消息 → 中文（UI 先验 150 压制单条英文 ~45 分）
+assert.equal(suggestionLanguage([
+  { role: 'user', text: 'restart dsh web' },
+], 'zh'), '简体中文');
+// zh UI + 两条强英文消息 → 英文（用户证据 ~240 推翻 UI 先验 150）
+assert.equal(suggestionLanguage([
+  { role: 'user', text: 'write a function that sorts the array' },
+  { role: 'assistant', text: 'sure' },
+  { role: 'user', text: 'also add unit tests for edge cases' },
+], 'zh'), 'English');
+// en UI + 中文消息 → 中文（无 UI 加成，用户证据直接胜出）
+assert.equal(suggestionLanguage([
+  { role: 'user', text: '帮我写个函数' },
+], 'en'), '简体中文');
+// en UI + 英文消息 → 英文（无 CJK 证据）
+assert.equal(suggestionLanguage([
+  { role: 'user', text: 'write a function' },
+], 'en'), 'English');
+// zh UI + 无用户消息（只有 assistant）→ 中文（UI 先验独立生效）
+assert.equal(suggestionLanguage([
+  { role: 'assistant', text: 'Hello, how can I help?' },
+], 'zh'), '简体中文');
+// 无 UI locale + 短中文 → 中文（纯用户证据）
+assert.equal(suggestionLanguage([
+  { role: 'user', text: '继续' },
+]), '简体中文');
+// zh UI + 短中文 → 中文（双重加成）
+assert.equal(suggestionLanguage([
+  { role: 'user', text: '继续' },
+], 'zh'), '简体中文');
+
+// —— 20 条消息采集 ——
+// 20 条中文消息（即使每条很短）→ 中文（累积证据）
+{
+  const pairs = [];
+  for (let i = 0; i < 20; i++) {
+    pairs.push({ role: 'user', text: '继续' });
+    if (i < 19) pairs.push({ role: 'assistant', text: 'ok' });
+  }
+  assert.equal(suggestionLanguage(pairs), '简体中文');
+}
+// 第 21 条英文消息不被采集（只看最近 20 条用户消息）
+{
+  const pairs = [];
+  // 20 条中文（旧→新）
+  for (let i = 0; i < 20; i++) {
+    pairs.push({ role: 'user', text: '继续' });
+    pairs.push({ role: 'assistant', text: 'ok' });
+  }
+  // 第 21 条英文（不会被采集）
+  pairs.push({ role: 'user', text: 'write a function that does something important' });
+  assert.equal(suggestionLanguage(pairs), '简体中文');
+}
+
+// —— UI 语言权重可调 ——
+// zh UI + 权重 0 + 英文消息 → 英文（权重 0 = 无 UI 先验）
+assert.equal(suggestionLanguage([
+  { role: 'user', text: 'restart dsh web' },
+], 'zh', 0), 'English');
+// zh UI + 权重 300 + 两条英文消息 → 中文（高权重压制）
+assert.equal(suggestionLanguage([
+  { role: 'user', text: 'write a function that sorts the array' },
+  { role: 'assistant', text: 'sure' },
+  { role: 'user', text: 'also add unit tests for edge cases' },
+], 'zh', 300), '简体中文');
+// zh UI + 权重 50 + 单条英文消息 → 英文（低权重不够压制）
+assert.equal(suggestionLanguage([
+  { role: 'user', text: 'restart dsh web' },
+], 'zh', 50), 'English');
 
 console.log('✅ sanitize 冒烟测试通过');

@@ -18,6 +18,8 @@ const COMPONENTS = [
   '.sgc-section{padding:16px 0}',
   '.sgc-section-heading{margin:0;font-size:13px;font-weight:600;line-height:1.5;color:var(--dsw-alias-label-primary)}',
   '.sgc-section-fields{display:flex;flex-direction:column}',
+  /* 两列并排网格（对齐 dsh-later 的 grid 布局） */
+  '.sgc-section-fieldsGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}',
 
   /* ==================== 字段 ==================== */
   '.sgc-field{display:flex;flex-direction:column;gap:6px;padding:12px 0}',

@@ -1,16 +1,16 @@
 {
   "name": "dsh-suggest-ghost",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "给 DSH 输入框加上输入预测：回合结束后自动建议你的下一句话，Tab 一键采纳；输入时按会话历史做前缀补全。输入预测 / 自动补全。",
   "author": "WuJiaoJue",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/WuJiaoJue/dsh-suggest-ghost.git"
+    "url": "git+https://github.com/dsh-plugins/dsh-suggest-ghost.git"
   },
-  "homepage": "https://github.com/WuJiaoJue/dsh-suggest-ghost",
+  "homepage": "https://github.com/dsh-plugins/dsh-suggest-ghost",
   "bugs": {
-    "url": "https://github.com/WuJiaoJue/dsh-suggest-ghost/issues"
+    "url": "https://github.com/dsh-plugins/dsh-suggest-ghost/issues"
   },
   "type": "module",
   "icon": "./icon.svg",
@@ -34,9 +34,18 @@
     "LICENSE"
   ],
   "screenshots": [
-    { "src": "./docs/mode-llm-real.png", "label": "LLM 下一条建议（草稿为空时自动预测）" },
-    { "src": "./docs/mode-history-real.png", "label": "历史前缀补全（输入时按会话历史匹配）" },
-    { "src": "./docs/settings-card.png", "label": "设置卡片（section 分组 + 热度管理）" }
+    {
+      "src": "./docs/mode-llm-real.png",
+      "label": "LLM 下一条建议（草稿为空时自动预测）"
+    },
+    {
+      "src": "./docs/mode-history-real.png",
+      "label": "历史前缀补全（输入时按会话历史匹配）"
+    },
+    {
+      "src": "./docs/settings-card.png",
+      "label": "设置卡片（section 分组 + 热度管理）"
+    }
   ],
   "engines": {
     "node": "^22.19 || >=24"
