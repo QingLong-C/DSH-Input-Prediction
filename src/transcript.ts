@@ -272,3 +272,55 @@ export function hasCJK(text: string): boolean {
 export function hasCyrillic(text: string): boolean {
   return /[\u0400-\u04ff]/.test(text);
 }
+
+/**
+ * 从旧转录对中提取摘要（零 LLM 成本的启发式方法）。
+ *
+ * 策略：
+ * 1. 只取用户消息（assistant 回复通常是格式化输出，信息密度低）；
+ * 2. 每条消息取第一句（句号/问号/感叹号/换行截断）；
+ * 3. 按字符预算从旧到新拼接，超限则截断最后一条；
+ * 4. 返回带前缀的摘要文本，供模型阅读。
+ *
+ * @param pairs - 将被裁剪掉的旧转录对
+ * @param maxChars - 摘要最大字符数
+ * @returns 摘要文本（空串表示无可提取内容）
+ */
+export function extractContextSummary(
+  pairs: readonly TranscriptPair[],
+  maxChars: number,
+): string {
+  if (pairs.length === 0 || maxChars < 50) return '';
+  const PREFIX = '[Earlier context summary] ';
+  const budget = maxChars - PREFIX.length;
+  if (budget < 50) return '';
+
+  // 只取用户消息，每条取第一句
+  const sentences: string[] = [];
+  for (const pair of pairs) {
+    if (pair.role !== 'user') continue;
+    // 取第一句：按句号/问号/感叹号/换行截断
+    const firstSentence = pair.text.split(/[.。?？!！\n]/)[0]?.trim() ?? '';
+    if (firstSentence.length > 0 && firstSentence.length < 200) {
+      sentences.push(firstSentence);
+    }
+  }
+  if (sentences.length === 0) return '';
+
+  // 按字符预算拼接
+  let summary = '';
+  for (const sentence of sentences) {
+    const candidate = summary.length === 0 ? sentence : `${summary}; ${sentence}`;
+    if (candidate.length > budget) {
+      // 超限：截断最后一条
+      const remaining = budget - summary.length - 2; // -2 for "; "
+      if (remaining > 20) {
+        summary = `${summary}; ${sentence.slice(0, remaining)}...`;
+      }
+      break;
+    }
+    summary = candidate;
+  }
+  if (summary.length === 0) return '';
+  return PREFIX + summary;
+}

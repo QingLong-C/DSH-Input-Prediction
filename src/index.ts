@@ -33,7 +33,8 @@ import { SUGGEST_EVENT } from './domain.js';
 import type { HotnessOp, SuggestGhostHotEntry, SuggestGhostSuggested } from './domain.js';
 import { flattenConfig, resolveConfig } from './generate.js';
 import type { Config as GenerateConfig, FlatConfig, ResolvedPluginConfig } from './generate.js';
-import { generateSuggestion, sessionEvents } from './generate.js';
+import { generateSuggestion, generateCompletion, sessionEvents } from './generate.js';
+import { sanitizeCompletion } from './inline.js';
 import { parseHotnessOps, setupHotnessPersistence } from './hotness-store.js';
 import { applySuggestGhostProjection, initSuggestGhostProjection, suggestGhostSchema } from './projection.js';
 import { EMPTY_PUSH, effectiveConfig, SUGGEST_GHOST_NAMESPACE } from './settings.js';
@@ -70,10 +71,14 @@ const EditableFields = {
   maxOutputTokens: z.natural().min(1).default(512).volatile(),
   /** 辅助请求端到端截止时间（毫秒）。 */
   timeoutMs: z.natural().min(1).default(60_000).volatile(),
-  /** 转录尾部保留的最近完成回合数（默认 1：只取最后一轮）。 */
-  maxRecentTurns: z.natural().min(1).default(1).volatile(),
+  /** 转录尾部保留的最近完成回合数（默认 3：保留近期上下文）。 */
+  maxRecentTurns: z.natural().min(1).default(3).volatile(),
   /** 转录字符预算。 */
   maxTranscriptChars: z.natural().min(1).default(12_000).volatile(),
+  /** 是否启用长会话上下文摘要（默认开）：旧消息被裁剪时提取摘要保留关键信息。 */
+  contextSummaryEnabled: z.boolean().default(true).volatile(),
+  /** 上下文摘要最大字符数（仅 contextSummaryEnabled 时生效）。 */
+  contextSummaryChars: z.natural().min(100).default(1500).volatile(),
   /** 建议可见字符上限。 */
   maxSuggestionChars: z.natural().min(1).default(240).volatile(),
   /**
@@ -93,6 +98,14 @@ const EditableFields = {
   historyMaxEntries: z.natural().min(0).default(50).volatile(),
   /** 草稿至少输入多少字符才触发历史补全。 */
   historyMinChars: z.natural().min(1).default(1).volatile(),
+  /** 停顿续写开关（默认开）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
+  inlineEnabled: z.boolean().default(true).volatile(),
+  /** 停顿多久后触发续写（毫秒）。 */
+  inlineDelayMs: z.natural().min(100).default(800).volatile(),
+  /** 草稿至少输入多少字符才触发续写。 */
+  inlineMinChars: z.natural().min(1).default(4).volatile(),
+  /** 续写可见字符上限。 */
+  inlineMaxChars: z.natural().min(1).default(160).volatile(),
   /** 幽灵显示时允许 → 逐词采纳。 */
   wordAccept: z.boolean().default(true).volatile(),
   /** 采纳建议的输入框快捷键（默认 Tab）。 */
@@ -145,6 +158,8 @@ export interface PluginConfigValues {
   timeoutMs: Volatile<number>;
   maxRecentTurns: Volatile<number>;
   maxTranscriptChars: Volatile<number>;
+  contextSummaryEnabled: Volatile<boolean>;
+  contextSummaryChars: Volatile<number>;
   maxSuggestionChars: Volatile<number>;
   provider: Volatile<string>;
   model: Volatile<string>;
@@ -153,6 +168,10 @@ export interface PluginConfigValues {
   historyCrossSession: Volatile<boolean>;
   historyMaxEntries: Volatile<number>;
   historyMinChars: Volatile<number>;
+  inlineEnabled: Volatile<boolean>;
+  inlineDelayMs: Volatile<number>;
+  inlineMinChars: Volatile<number>;
+  inlineMaxChars: Volatile<number>;
   wordAccept: Volatile<boolean>;
   acceptKey: Volatile<string>;
   languageMode: Volatile<string>;
@@ -175,8 +194,8 @@ const ConfigSchema = z.object({
 
 export const Config: z<Schemastery.TypeS<typeof ConfigSchema>, PluginConfigValues> = ConfigSchema;
 
-/** 所需服务：LLM 路由 + 会话存储。 */
-export const inject = ['llm', 'sessions'];
+/** 所需服务：LLM 路由 + 会话存储 + 设置服务。 */
+export const inject = ['llm', 'sessions', 'settings'];
 
 /** 插件名（与 cordis 条目 id 及 manifest 一致）。 */
 export const name = 'dsh-suggest-ghost';
@@ -210,6 +229,8 @@ function lastSuggestedTurnInLog(session: Session): number {
  * @param config - 必填的有界生成策略。
  */
 export function apply(ctx: Context, config: GenerateConfig): void {
+  console.log('[dsh-suggest-ghost] apply() called, starting plugin initialization...');
+  ctx.logger.info('dsh-suggest-ghost: apply() called, starting plugin initialization...');
   const resolved = resolveConfig(config);
   const states = new WeakMap<Session, SessionState>();
   const tracked = new Set<SessionState>();
@@ -244,9 +265,15 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     return typeof payload === 'string' ? payload : EMPTY_PUSH;
   };
   ctx.inject(['settings'], (settingsCtx) => {
+    console.log('[dsh-suggest-ghost] settings inject callback called');
+    ctx.logger.info('dsh-suggest-ghost: settings inject callback called');
     try {
       const svc = (settingsCtx as { settings?: { update: (ns: unknown, patch: object) => Promise<void> } }).settings;
-      if (svc === undefined) return;
+      if (svc === undefined) {
+        console.log('[dsh-suggest-ghost] settings service is undefined!');
+        ctx.logger.warn('dsh-suggest-ghost: settings service is undefined');
+        return;
+      }
       settingsSvc = svc;
       liveSettings = flattenConfig(resolved);
       // 重启/重载对账：`_push` 是建议（不可重建的 LLM 输出）唯一的持久载体。
@@ -269,10 +296,15 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       // 内核改 volatile 引用并 emit `settings/document-updated(ns, revision)`。
       // 该事件只带 (ns, revision)，故每次都重读引用比对载荷。
       ctx.on('settings/document-updated', (ns: string) => {
+        ctx.logger.info(`dsh-suggest-ghost: settings/document-updated, ns = ${ns}, expected = ${SUGGEST_GHOST_NAMESPACE}`);
         if (ns !== SUGGEST_GHOST_NAMESPACE) return;
         liveSettings = flattenConfig(resolved);
         const payload = readOps();
-        if (payload === lastOpsPayload) return; // 无变化
+        ctx.logger.info(`dsh-suggest-ghost: payload = ${JSON.stringify(payload)}, lastOpsPayload = ${JSON.stringify(lastOpsPayload)}`);
+        if (payload === lastOpsPayload) {
+          ctx.logger.info(`dsh-suggest-ghost: no change, skip`);
+          return;
+        }
         lastOpsPayload = payload;
         consumeOps(parseHotnessOps(payload), svc);
       });
@@ -375,6 +407,99 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     lastSuggestionSession = next.sessionId;
   };
 
+  // —— 停顿续写状态 ——
+  /** 续写结果缓存：sessionId → {draft, text}；LRU 上限 16。 */
+  const COMPLETION_CACHE_CAP = 16;
+  const completionCache = new Map<string, { draft: string; text: string }>();
+  /** 在途续写生成：sessionId → AbortController（单飞：同会话只保留最新一次）。 */
+  const completionPending = new Map<string, AbortController>();
+
+  const cacheCompletion = (sessionId: string, draft: string, text: string): void => {
+    completionCache.delete(sessionId);
+    completionCache.set(sessionId, { draft, text });
+    while (completionCache.size > COMPLETION_CACHE_CAP) {
+      const oldest = completionCache.keys().next();
+      if (oldest.done === true) break;
+      completionCache.delete(oldest.value);
+    }
+  };
+
+  /**
+   * 为指定会话的当前草稿生成行内续写（停顿续写）。
+   *
+   * 与 handleTurnEnd 的关键差异：
+   * 1. 输入是草稿文本而非回合边界
+   * 2. 单飞：同会话只保留最新一次生成（新草稿到达时中止旧生成）
+   * 3. 失败静默：不推送错误信息（续写是锦上添花，不应打扰用户）
+   * 4. 缓存命中时直接重推（同 sessionId+draft 的缓存结果）
+   */
+  const handleComplete = (sessionId: string, draft: string): void => {
+    ctx.logger.info(`dsh-suggest-ghost: handleComplete called, sessionId = ${sessionId}, draft = ${JSON.stringify(draft)}`);
+    const cfg = effective();
+    if (cfg.inlineEnabled === false) {
+      ctx.logger.info(`dsh-suggest-ghost: inlineEnabled is false, skip`);
+      return;
+    }
+    if (draft.trim().length < cfg.inlineMinChars) {
+      ctx.logger.info(`dsh-suggest-ghost: draft too short, skip`);
+      return;
+    }
+    const session = ctx.sessions.get(sessionId as SessionId);
+    if (session === undefined) {
+      ctx.logger.info(`dsh-suggest-ghost: session not found, skip`);
+      return;
+    }
+    ctx.logger.info(`dsh-suggest-ghost: session found, generating completion...`);
+    // 缓存命中：同 sessionId+draft → 直接重推。
+    const cached = completionCache.get(sessionId);
+    if (cached !== undefined && cached.draft === draft) {
+      pushToClient({
+        ...statePushOf(sessionId),
+        completion: cached,
+        completionSessionId: sessionId,
+      });
+      return;
+    }
+    // 单飞：中止同会话的在途生成。
+    const existing = completionPending.get(sessionId);
+    if (existing !== undefined) existing.abort();
+    const controller = new AbortController();
+    completionPending.set(sessionId, controller);
+    const startedAt = Date.now();
+    generateCompletion(
+      ctx,
+      cfg,
+      session,
+      draft,
+      controller.signal,
+      clientUiLocale || undefined,
+      cfg.languageMode,
+      cfg.uiLocaleWeight,
+    ).then(
+      (result) => {
+        // 生成完成：检查是否仍为当前（未被新草稿中止）。
+        if (completionPending.get(sessionId) !== controller) return;
+        completionPending.delete(sessionId);
+        if (result.text === undefined) return; // 空/不合格 → 静默
+        cacheCompletion(sessionId, draft, result.text);
+        pushToClient({
+          ...statePushOf(sessionId),
+          completion: { draft, text: result.text },
+          completionSessionId: sessionId,
+        });
+        ctx.logger.debug?.(`dsh-suggest-ghost: completion pushed for session ${sessionId} in ${Date.now() - startedAt}ms`);
+      },
+      (error: unknown) => {
+        if (completionPending.get(sessionId) !== controller) return;
+        completionPending.delete(sessionId);
+        // 中止 = 被新草稿取代，不算失败；其他错误静默丢弃。
+        if (!controller.signal.aborted) {
+          ctx.logger.debug?.(`dsh-suggest-ghost: completion failed for session ${sessionId}: ${String(error)}`);
+        }
+      },
+    );
+  };
+
   /** 推给 client 的 `_push` 载荷（结构化形态；写盘前序列化）。 */
   interface ClientPush {
     /** 最新 LLM 建议；null = 清空当前建议。 */
@@ -389,6 +514,10 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     readonly history: readonly string[] | null;
     /** history 所属会话；null 同步 history 为 null。 */
     readonly historySessionId: string | null;
+    /** 行内续写：null = 清空当前续写；undefined = 不携带（保留 client 现值）。 */
+    readonly completion?: { readonly draft: string; readonly text: string } | null;
+    /** completion 所属会话（归属守卫：切会话时清掉上一个会话的续写）。 */
+    readonly completionSessionId?: string | null;
     /** 本次生成失败的摘要（可诊断；成功/无错误时缺省）。 */
     readonly error?: string;
   }
@@ -403,7 +532,12 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     const historyKey = p.history === null || p.history.length === 0 || p.historySessionId === null
       ? '\u2205'
       : `${p.historySessionId}#${p.history.length}:${p.history[p.history.length - 1] ?? ''}`;
-    return `${sug}<HOT>${hotKey}<T>${p.total}<HIST>${historyKey}<ERR>${p.error ?? ''}`;
+    const completionKey = p.completion === null
+      ? '\u2205'
+      : p.completion === undefined
+        ? '\u2204' // 未携带（保留 client 现值）
+        : `${p.completionSessionId ?? ''}#${p.completion.draft}=${p.completion.text}`;
+    return `${sug}<HOT>${hotKey}<T>${p.total}<HIST>${historyKey}<CPL>${completionKey}<ERR>${p.error ?? ''}`;
   };
   /**
    * 经 `_push` volatile 字段把最新建议+热度+历史推给 client。
@@ -449,6 +583,11 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       ...(p.history !== null && p.historySessionId !== null
         ? { history: [...p.history], historySessionId: p.historySessionId }
         : {}),
+      ...(p.completion === null
+        ? { completion: null, completionSessionId: null }
+        : p.completion !== undefined
+          ? { completion: { draft: p.completion.draft, text: p.completion.text }, completionSessionId: p.completionSessionId ?? null }
+          : {}),
       ...(p.error !== undefined ? { error: p.error } : {}),
     };
     // 合并缓冲：若已有在途写入，只更新「最新待写」；flush 在途完成后补写。
@@ -498,6 +637,9 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       total: hotness.size,
       history: ring === undefined ? null : ring.slice(-HISTORY_PUSH_CAP),
       historySessionId: ring === undefined ? null : sessionId,
+      ...(sessionId !== null && completionCache.has(sessionId)
+        ? { completion: completionCache.get(sessionId)!, completionSessionId: sessionId }
+        : {}),
     };
   };
 
@@ -517,11 +659,16 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     const ops = parsed.ops;
     if (ops.length === 0) return;
     for (const op of ops) {
-      if (op.op !== 'pull') continue;
-      // 无论历史环可不可得都应答：环缺失（会话尚未进店/已销毁）时 statePushOf
-      // 会省略 history（client 保留现值），但热度与对账后的建议照常送达——
-      // 静默丢弃会让 client 永远等不到这一轮对账。
-      pushToClient(statePushOf(op.sessionId));
+      if (op.op === 'pull') {
+        ctx.logger.info(`dsh-suggest-ghost: consumeOps pull, sessionId = ${op.sessionId}`);
+        // 无论历史环可不可得都应答：环缺失（会话尚未进店/已销毁）时 statePushOf
+        // 会省略 history（client 保留现值），但热度与对账后的建议照常送达——
+        // 静默丢弃会让 client 永远等不到这一轮对账。
+        pushToClient(statePushOf(op.sessionId));
+      } else if (op.op === 'complete') {
+        ctx.logger.info(`dsh-suggest-ghost: consumeOps complete, sessionId = ${op.sessionId}, draft = ${JSON.stringify(op.draft)}`);
+        handleComplete(op.sessionId, op.draft);
+      }
     }
     const changed = persistence.applyOps(ops);
     if (changed > 0) ctx.logger.info(`dsh-suggest-ghost: hotness ops applied (${changed} changed)`);
@@ -629,9 +776,10 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     }
   });
 
-  // 插件卸载时中止所有在途生成。
+  // 插件卸载时中止所有在途生成（建议 + 续写）。
   ctx.effect(() => () => {
     for (const state of tracked) state.pending?.controller.abort();
+    for (const controller of completionPending.values()) controller.abort();
   });
 
   // `suggestGhost` 投影单元：last-wins fold。仅当投影注册表已组合时激活
@@ -674,4 +822,6 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       });
     }
   });
+  console.log('[dsh-suggest-ghost] apply() completed successfully');
+  ctx.logger.info('dsh-suggest-ghost: apply() completed successfully');
 }
