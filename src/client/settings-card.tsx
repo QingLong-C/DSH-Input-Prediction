@@ -9,7 +9,8 @@
  * - section：`padding 16px 0`，标题 13px/600（llm / history 两个 section）；
  * - 字段：`padding 12px 0`，label 13px/500 在上、控件在下、无字段分隔线；
  * - 布尔字段：官方 toggle 行（label 左 + switch 右，36×20 圆角滑块）；
- * - 帮助按钮：24×24、8px 圆角、12px 圆圈问号图标，点击展开字段说明；
+ * - 帮助按钮：24×24、8px 圆角、官方 ConfigField 同款 IconInfoOutlineRegular（12px），
+ *   点击展开字段说明；
  * - footer：保存/放弃按钮靠右（无顶部分隔线）。
  * 样式经 <style> 注入（styles.ts，sgc- 前缀类名），与官方 CSS 注入方式相同。
  *
@@ -28,6 +29,10 @@ import type { HotnessOp } from '../domain.ts';
 import { keyEventToSpec } from './keyspec.ts';
 import { useGhostT, type GhostLang, type LocaleFaceLike } from './useGhostT.ts';
 import { injectStyles } from './styles.ts';
+// 图标取自官方图标集：primitives 是 Web 壳的 platform module（冻结模块表常驻），
+// esbuild 标 external 后由 __ModuleLoader__ 的 require 在运行时解析（与 react 同
+// 机制，参考 dsh-group-status 的用法），无需 peerDependency 或 dsh.client.inject。
+import { IconChevronDownOutlineRegular, IconInfoOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives';
 
 /** 字段输入形态。 */
 export type FieldKind = 'number' | 'text' | 'boolean' | 'key' | 'select';
@@ -50,7 +55,7 @@ export const GHOST_FIELDS: ReadonlyArray<{
   readonly label: Bilingual;
   readonly hint: Bilingual;
   readonly kind: FieldKind;
-  readonly section: 'llm' | 'history' | 'language';
+  readonly section: 'llm' | 'history' | 'inline' | 'language';
   /** 是否可经设置页写回（false = 只能改配置文件）。 */
   readonly writable: boolean;
   /** select 控件的选项列表（仅 kind='select' 时使用）。 */
@@ -91,8 +96,8 @@ export const GHOST_FIELDS: ReadonlyArray<{
     key: 'maxRecentTurns',
     label: { zh: '参考回合数', en: 'Recent turns referenced' },
     hint: {
-      zh: '转录尾部保留的最近完成回合数（1 = 只取最后一轮）',
-      en: 'Completed turns kept from the transcript tail (1 = last turn only)',
+      zh: '转录尾部保留的最近完成回合数（默认 3；旧回合由「长会话摘要」保留关键信息）',
+      en: 'Completed turns kept from the transcript tail (default 3; older turns preserved via summary)',
     },
     kind: 'number',
     section: 'llm',
@@ -104,6 +109,28 @@ export const GHOST_FIELDS: ReadonlyArray<{
     hint: {
       zh: '发送给建议模型的转录字符上限',
       en: 'Max transcript characters sent to the suggestion model',
+    },
+    kind: 'number',
+    section: 'llm',
+    writable: true,
+  },
+  {
+    key: 'contextSummaryEnabled',
+    label: { zh: '长会话摘要', en: 'Long session summary' },
+    hint: {
+      zh: '开启后，被裁剪的旧消息会提取摘要保留关键上下文（零额外 LLM 成本）',
+      en: 'When on, trimmed old messages are summarized to preserve key context (zero extra LLM cost)',
+    },
+    kind: 'boolean',
+    section: 'llm',
+    writable: true,
+  },
+  {
+    key: 'contextSummaryChars',
+    label: { zh: '摘要字符预算', en: 'Summary character budget' },
+    hint: {
+      zh: '上下文摘要的最大字符数（仅长会话摘要开启时生效）',
+      en: 'Max characters for the context summary (only when long session summary is on)',
     },
     kind: 'number',
     section: 'llm',
@@ -220,6 +247,51 @@ export const GHOST_FIELDS: ReadonlyArray<{
     section: 'history',
     writable: true,
   },
+  // —— 停顿续写 ——
+  {
+    key: 'inlineEnabled',
+    label: { zh: '停顿续写', en: 'Pause completion' },
+    hint: {
+      zh: '输入停顿后由 LLM 续写草稿（历史补全未命中时生效）',
+      en: 'LLM continues the draft after a typing pause (when history completion misses)',
+    },
+    kind: 'boolean',
+    section: 'inline',
+    writable: true,
+  },
+  {
+    key: 'inlineDelayMs',
+    label: { zh: '停顿时长', en: 'Pause duration' },
+    hint: {
+      zh: '停止输入多久后触发续写（毫秒）',
+      en: 'How long to pause before triggering completion (ms)',
+    },
+    kind: 'number',
+    section: 'inline',
+    writable: true,
+  },
+  {
+    key: 'inlineMinChars',
+    label: { zh: '最少输入字符', en: 'Minimum typed characters' },
+    hint: {
+      zh: '草稿输入多少字符后才触发续写',
+      en: 'How many characters must be typed before completion triggers',
+    },
+    kind: 'number',
+    section: 'inline',
+    writable: true,
+  },
+  {
+    key: 'inlineMaxChars',
+    label: { zh: '续写长度上限', en: 'Completion length cap' },
+    hint: {
+      zh: '续写可见字符上限（超出按词边界截断）',
+      en: 'Max visible characters of the completion (truncated at word boundary)',
+    },
+    kind: 'number',
+    section: 'inline',
+    writable: true,
+  },
   // —— 语言设置 ——
   {
     key: 'languageMode',
@@ -270,6 +342,7 @@ const zhStrings = {
   /** 分组标题 */
   sectionLlm: 'LLM 下一条建议',
   sectionHistory: '历史前缀补全',
+  sectionInline: '停顿续写',
   sectionLanguage: '语言设置',
   /** 帮助按钮无障碍标签（label 为字段名） */
   helpFor: (label: string): string => `${label}说明`,
@@ -310,6 +383,7 @@ const enStrings: { [K in keyof typeof zhStrings]: (typeof zhStrings)[K] } = {
   showInSettingsHint: 'Show this plugin\'s settings page in the settings dialog (refresh to take effect)',
   sectionLlm: 'LLM next suggestion',
   sectionHistory: 'History prefix completion',
+  sectionInline: 'Pause completion',
   sectionLanguage: 'Language settings',
   helpFor: (label: string): string => `About ${label}`,
   saved: 'Saved',
@@ -359,26 +433,6 @@ type Value = Record<string, unknown>;
 function displayValue(v: unknown): string {
   if (typeof v === 'boolean') return v ? 'true' : 'false';
   return v === undefined || v === null ? '' : String(v);
-}
-
-/** 折叠按钮的 chevron-down 图标（内联 SVG，零依赖；热度管理分组折叠用）。 */
-function ChevronDown({ className }: { className?: string }): ReactElement {
-  return (
-    <svg width="14" height="14" viewBox="0 0 16 16" className={className} aria-hidden="true">
-      <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-/** 官方同款帮助图标：12px 圆圈问号（对齐 dsh-later 帮助按钮的 SVG）。 */
-function HelpIcon(): ReactElement {
-  return (
-    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true" strokeWidth="1">
-      <path d="M12.5757 7.00012C12.5757 3.92085 10.0794 1.42463 7.00012 1.42456C3.9208 1.42456 1.42456 3.9208 1.42456 7.00012C1.42463 10.0794 3.92085 12.5757 7.00012 12.5757C10.0793 12.5756 12.5756 10.0793 12.5757 7.00012ZM13.8002 7.00012C13.8001 10.7559 10.7559 13.8001 7.00012 13.8002C3.2443 13.8002 0.199291 10.7559 0.199219 7.00012C0.199219 3.24426 3.24426 0.199219 7.00012 0.199219C10.7559 0.199291 13.8002 3.2443 13.8002 7.00012Z" fill="currentColor"/>
-      <path d="M7.6127 3.18921V4.55986H6.38735V3.18921H7.6127Z" fill="currentColor"/>
-      <path d="M7.6127 5.68921V10.8109H6.38735V5.68921H7.6127Z" fill="currentColor"/>
-    </svg>
-  );
 }
 
 /** 快捷键捕获控件：点击进入录制态，按下组合键即写入规范 spec（Esc 取消）。
@@ -747,7 +801,7 @@ export function SuggestGhostCard({ scope, locale, surface }: SuggestGhostCardPro
               aria-controls={helpId}
               onClick={() => setHelpOpen(prev => ({ ...prev, [f.key]: !helpOpenNow }))}
             >
-              <HelpIcon />
+              <IconInfoOutlineRegular size={12} />
             </button>
           </div>
         </div>
@@ -765,12 +819,14 @@ export function SuggestGhostCard({ scope, locale, surface }: SuggestGhostCardPro
 
   const llmFields = GHOST_FIELDS.filter(f => f.section === 'llm');
   const historyFields = GHOST_FIELDS.filter(f => f.section === 'history');
+  const inlineFields = GHOST_FIELDS.filter(f => f.section === 'inline');
   const languageFields = GHOST_FIELDS.filter(f => f.section === 'language');
 
   /** Section 布局：grid = 两列并排（适合短字段），stack = 单列堆叠。 */
   const SECTION_LAYOUT: Record<string, 'grid' | 'stack'> = {
     llm: 'stack',
     history: 'stack',
+    inline: 'stack',
     language: 'grid',
   };
 
@@ -811,6 +867,10 @@ export function SuggestGhostCard({ scope, locale, surface }: SuggestGhostCardPro
         <h3 className="sgc-section-heading" id="sgc-section-history">{t.sectionHistory}</h3>
         <div className={SECTION_LAYOUT.history === 'grid' ? 'sgc-section-fields sgc-section-fieldsGrid' : 'sgc-section-fields'}>{historyFields.map(renderField)}</div>
       </section>
+      <section className="sgc-section" aria-labelledby="sgc-section-inline">
+        <h3 className="sgc-section-heading" id="sgc-section-inline">{t.sectionInline}</h3>
+        <div className={SECTION_LAYOUT.inline === 'grid' ? 'sgc-section-fields sgc-section-fieldsGrid' : 'sgc-section-fields'}>{inlineFields.map(renderField)}</div>
+      </section>
       <section className="sgc-section" aria-labelledby="sgc-section-language">
         <h3 className="sgc-section-heading" id="sgc-section-language">{t.sectionLanguage}</h3>
         <div className={SECTION_LAYOUT.language === 'grid' ? 'sgc-section-fields sgc-section-fieldsGrid' : 'sgc-section-fields'}>{languageFields.map(renderField)}</div>
@@ -825,7 +885,7 @@ export function SuggestGhostCard({ scope, locale, surface }: SuggestGhostCardPro
           onClick={() => setHotOpen(o => !o)}
         >
           <span className="sgc-sectionBtnText">{t.sectionHotness}</span>
-          <ChevronDown className={hotOpen ? 'sgc-chevron sgc-chevronOpen' : 'sgc-chevron'} />
+          <IconChevronDownOutlineRegular size={14} className={hotOpen ? 'sgc-chevron sgc-chevronOpen' : 'sgc-chevron'} />
         </button>
         {hotOpen && (
           <div id="sgc-hotness-body">
