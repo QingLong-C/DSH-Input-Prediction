@@ -312,8 +312,8 @@ export function extractContextSummary(
   for (const sentence of sentences) {
     const candidate = summary.length === 0 ? sentence : `${summary}; ${sentence}`;
     if (candidate.length > budget) {
-      // 超限：截断最后一条
-      const remaining = budget - summary.length - 2; // -2 for "; "
+      // 超限：截断最后一条（预留 3 字符给 "..."）
+      const remaining = budget - summary.length - 2 - 3; // -2 for "; ", -3 for "..."
       if (remaining > 20) {
         summary = `${summary}; ${sentence.slice(0, remaining)}...`;
       }
