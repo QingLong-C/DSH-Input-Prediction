@@ -30,7 +30,7 @@
 import type {} from '@deepseek-ai/dsh-client-ui-conversation';
 import type { Context } from '@deepseek-ai/cordis';
 import type { SuggestGhostProjection, SuggestGhostSuggested } from '../domain.ts';
-import { commonPrefixLength, extractHistory, historySuggestion, normalizeForMatch, stripCommandPrefix } from './history.ts';
+import { clearNormalizeCache, commonPrefixLength, extractHistory, historySuggestion, normalizeForMatch, stripCommandPrefix } from './history.ts';
 import { nextAcceptChunk } from './chunk.ts';
 import { keyCodeOf } from './keyspec.ts';
 import { SuggestGhostCard } from './settings-card.tsx';
@@ -775,6 +775,25 @@ function applyBody(ctx: Context): void {
     suggestionSessionId: null,
   };
 
+  /**
+   * 设置版本号：每次 applySettings 实际替换 settings 时递增。
+   * 用于 ghostContent 缓存失效——避免把"草稿未变但 settings 已换"误判为命中。
+   */
+  let settingsEpoch = 0;
+
+  /** hotCounts Map 缓存：按 hot 数组引用失效，避免每次按键重建 2000 条归一化。 */
+  let hotCountsCache: { src: readonly { text: string; count: number }[] | null; map: Map<string, number> | undefined } | null = null;
+
+  /** ghostContent 结果缓存：按 (draft, settingsEpoch, composing, running, currentId) 失效。 */
+  let ghostContentCache: {
+    draft: string;
+    settingsEpoch: number;
+    composing: boolean;
+    running: boolean;
+    currentId: string | undefined;
+    result: GhostContent | null;
+  } | null = null;
+
   /** 解析当前会话绑定（会话切换时重建）。 */
   const resolve = (): void => {
     const id = currentSessionIdOf(sessions.list.getSnapshot());
@@ -804,7 +823,7 @@ function applyBody(ctx: Context): void {
     pullHistory(id);
   };
 
-  /** 计算当前应显示的幽灵内容（null = 不显示）。 */
+  /** 计算当前应显示的幽灵内容（null = 不显示）。结果按 (draft, settingsEpoch, composing, running, currentId) 缓存。 */
   const ghostContent = (): GhostContent | null => {
     if (bound === null) return null;
     if (composing) return null; // IME 组词中：组合预览与幽灵后缀重叠，抑制显示
@@ -813,6 +832,29 @@ function applyBody(ctx: Context): void {
     const draft = bound.input.state.getSnapshot().draft;
     const currentId = currentSessionIdOf(sessions.list.getSnapshot());
 
+    // 缓存命中：所有输入维度未变 → 直接返回上次结果，跳过全部归一化与打分。
+    if (ghostContentCache !== null
+      && ghostContentCache.draft === draft
+      && ghostContentCache.settingsEpoch === settingsEpoch
+      && ghostContentCache.composing === composing
+      && ghostContentCache.running === snapshot.running
+      && ghostContentCache.currentId === currentId) {
+      return ghostContentCache.result;
+    }
+
+    const result = computeGhostContent(draft, snapshot, currentId);
+
+    // 写入缓存（composing 已在函数入口早退，此处必为 false）。
+    ghostContentCache = { draft, settingsEpoch, composing: false, running: snapshot.running, currentId, result };
+    return result;
+  };
+
+  /** ghostContent 的实际计算（无缓存层）。 */
+  const computeGhostContent = (
+    draft: string,
+    snapshot: { running: boolean },
+    currentId: string | undefined,
+  ): GhostContent | null => {
     // 模式 1：草稿非空 → 历史前缀补全（打分制：新近度为主、频次/热度为辅）。
     if (settings.historyEnabled && draft.trim() !== '') {
       // 草稿是斜杠命令整行时（如 `/later +3m 我重新部署了…`），用命令名之后
@@ -830,9 +872,14 @@ function applyBody(ctx: Context): void {
       // C：全局热度频次始终参与打分（host 无条件推送）；「跨会话搜索」开关
       // 只决定是否把其他会话的高频文本并入候选列表。
       const hot = settings.hot;
-      const hotCounts = hot !== null && hot.length > 0
-        ? new Map(hot.map(h => [normalizeForMatch(h.text), h.count] as const))
-        : undefined;
+      // hotCounts Map 缓存：按 hot 数组引用失效，避免每次按键重建 2000 条归一化。
+      if (hotCountsCache === null || hotCountsCache.src !== hot) {
+        const map = hot !== null && hot.length > 0
+          ? new Map(hot.map(h => [normalizeForMatch(h.text), h.count] as const))
+          : undefined;
+        hotCountsCache = { src: hot, map };
+      }
+      const hotCounts = hotCountsCache.map;
       const full = historySuggestion(history, contentDraft, {
         minChars: settings.historyMinChars,
         maxEntries: settings.historyMaxEntries,
@@ -1047,6 +1094,11 @@ function applyBody(ctx: Context): void {
           const rev = typeof entry.revision === 'number' ? entry.revision : 0;
           if (rev === lastRevision) return;
           lastRevision = rev;
+          // settings 实际变更 → 失效所有归一化/打分缓存，避免返回陈旧结果。
+          settingsEpoch++;
+          clearNormalizeCache();
+          hotCountsCache = null;
+          ghostContentCache = null;
           const v = (entry.value ?? {}) as Record<string, unknown>;
           let pushed: {
             suggestion?: unknown;

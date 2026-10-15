@@ -60,16 +60,32 @@ export function extractHistory(nodes: readonly unknown[]): string[] {
 }
 
 /**
+ * 归一化缓存：同一文本只跑一次 5 条正则。
+ * 缓存在 settings 变更时由调用方通过 {@link clearNormalizeCache} 清空，
+ * 避免跨推送的旧条目泄漏内存。
+ */
+const normalizeCache = new Map<string, string>();
+
+/** 清空归一化缓存（settings 变更时调用）。 */
+export function clearNormalizeCache(): void {
+  normalizeCache.clear();
+}
+
+/**
  * 匹配用归一化：全角 ASCII（U+FF01–U+FF5E，含 ，？！等）→ 半角、表意空格 →
  * 空格、小写化、连续空白折叠、去首尾。只用于比较与打分，不改动展示文本。
  */
 export function normalizeForMatch(text: string): string {
-  return text
+  const cached = normalizeCache.get(text);
+  if (cached !== undefined) return cached;
+  const result = text
     .replace(/[\uFF01-\uFF5E]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
     .replace(/\u3000/g, ' ')
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
+  normalizeCache.set(text, result);
+  return result;
 }
 
 /** 两串按 UTF-16 码元的公共前缀长度（渲染幽灵时对齐已输入部分用）。 */
