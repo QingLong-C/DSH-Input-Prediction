@@ -796,8 +796,8 @@ function applyBody(ctx: Context): void {
   } | null = null;
 
   /** 解析当前会话绑定（会话切换时重建）。 */
-  const resolve = (): void => {
-    const id = currentSessionIdOf(sessions.list.getSnapshot());
+  const resolve = (currentId: string | undefined): void => {
+    const id = currentId;
     if (id === undefined) {
       bound = null;
       lastSessionId = undefined;
@@ -825,13 +825,12 @@ function applyBody(ctx: Context): void {
   };
 
   /** 计算当前应显示的幽灵内容（null = 不显示）。结果按 (draft, settingsEpoch, composing, running, currentId) 缓存。 */
-  const ghostContent = (): { content: GhostContent | null; key: string | null } => {
+  const ghostContent = (currentId: string | undefined): { content: GhostContent | null; key: string | null } => {
     if (bound === null) return { content: null, key: null };
     if (composing) return { content: null, key: null }; // IME 组词中：组合预览与幽灵后缀重叠，抑制显示
     // 0.1.2 会话快照只余 lifecycle 字段；本插件用到的仅剩 `running`。
     const snapshot = bound.session.getSnapshot() as { running: boolean };
     const draft = bound.input.state.getSnapshot().draft;
-    const currentId = currentSessionIdOf(sessions.list.getSnapshot());
 
     // 缓存命中：所有输入维度未变 → 直接返回上次结果，跳过全部归一化与打分。
     if (ghostContentCache !== null
@@ -920,9 +919,10 @@ function applyBody(ctx: Context): void {
 
   /** 渲染幽灵 overlay。 */
   const render = (): void => {
-    resolve();
+    const currentId = currentSessionIdOf(sessions.list.getSnapshot());
+    resolve(currentId);
     retryPendingPull();
-    const { content, key } = ghostContent();
+    const { content, key } = ghostContent(currentId);
     if (content === null) {
       if (shown !== null) {
         overlay.hide();
@@ -1260,10 +1260,10 @@ function applyBody(ctx: Context): void {
       // 幂等，重复渲染无副作用）。
       deferredRenders = [60, 300, 900].map((ms) => setTimeout(render, ms));
     };
-    const rebind = (): void => {
+    const rebind = (knownId?: string | undefined): void => {
       for (const un of unsubs) un();
       unsubs = [];
-      resolve();
+      resolve(knownId ?? currentSessionIdOf(sessions.list.getSnapshot()));
       if (bound !== null) {
         unsubs.push(
           bound.session.subscribe(render),
@@ -1280,7 +1280,7 @@ function applyBody(ctx: Context): void {
     const onList = (): void => {
       // 会话切换（mainView 保有者变化）→ 重绑订阅（resolve 内即发起 pull）；否则仅渲染。
       const id = currentSessionIdOf(sessions.list.getSnapshot());
-      if (id !== lastSessionId) rebind();
+      if (id !== lastSessionId) rebind(id);
       render();
     };
     const unList = sessions.list.subscribe(onList);
