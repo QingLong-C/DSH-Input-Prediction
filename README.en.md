@@ -64,6 +64,11 @@ The workflow preserves project branding, Chinese follow-up support, and default 
 
 Releases do not install themselves on your computer. Run a manual check from [Actions](https://github.com/QingLong-C/DSH-Input-Prediction/actions/workflows/sync-upstream.yml). The optional `rebuild` input increments the version and publishes even without upstream changes; leave it off for routine checks. GitHub may disable scheduled workflows after 60 days of public-repository inactivity.
 
+
+Live-model regression uses **DeepSeek V4.1 Flash** (`deepseek-v4.1-flash`), without GPT. To pin prediction to this model, enter your configured DeepSeek provider ID and this model ID in plugin settings. Generation and intent verification use the same model. Provider IDs are installation-specific and are not embedded in the bundle.
+
+For a manual live regression (billable API requests), set `PREDICTION_BASE_URL` (including `/v1`) and `PREDICTION_API_KEY`, then run `pnpm build && node scripts/live-deepseek-regression.mjs`. The script uses synthetic conversations only and does not read private conversations or local credentials. Regular CI keeps using deterministic tests without API credentials.
+
 ## Compatibility and development
 
 Installation and live Chinese conversations have been tested on **DSh desktop `0.2.0-rc.2`**, including suggestion display, Tab acceptance, Enter submission, Esc dismissal, and hiding while typing. Other versions remain unverified.

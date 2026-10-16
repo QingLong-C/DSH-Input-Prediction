@@ -66,6 +66,11 @@ GitHub Actions 每 **12 小时**检查上游更新，计划执行时间为北京
 
 自动发布仅更新 GitHub，不会自动安装到本机。可在 [Actions](https://github.com/QingLong-C/DSH-Input-Prediction/actions/workflows/sync-upstream.yml) 中手动运行检查；`rebuild` 选项用于在没有上游更新时重新递增版本并发布，常规检查无需开启。公开仓库连续 60 天没有活动时，GitHub 可能停用定时工作流，届时需手动重新启用。
 
+
+本项目的真实模型回归使用 **DeepSeek V4.1 Flash**（模型 ID：`deepseek-v4.1-flash`），不依赖 GPT。要固定预测模型，在插件设置里填写你已配置的 DeepSeek 服务商 ID 和该模型 ID；候选生成与意图核对使用同一模型。服务商 ID 因安装环境而异，不随安装包写死。
+
+手动运行真实模型回归（会调用接口并消耗额度）：先设置 `PREDICTION_BASE_URL`（包含 `/v1`）和 `PREDICTION_API_KEY` 环境变量，再运行 `pnpm build && node scripts/live-deepseek-regression.mjs`。脚本只使用合成对话，不读取私人会话或本机凭据；普通 CI 仍运行不需要密钥的确定性测试。
+
 ## 兼容性与验证
 
 已在 **DSh 桌面客户端 `0.2.0-rc.2`** 上验证安装、中文对话预测、灰字显示、Tab 采纳、Enter 发送、Esc 忽略及输入时隐藏。其他客户端版本尚未完成实测。
