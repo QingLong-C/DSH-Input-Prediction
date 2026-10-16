@@ -55,7 +55,8 @@ export type HotnessOp =
   | { readonly op: 'pin'; readonly text: string; readonly pinned: boolean }
   | { readonly op: 'add'; readonly text: string; readonly pinned?: boolean }
   | { readonly op: 'clear' }
-  | { readonly op: 'pull'; readonly sessionId: string };
+  | { readonly op: 'pull'; readonly sessionId: string }
+  | { readonly op: 'complete'; readonly sessionId: string; readonly draft: string };
 
 /**
  * `suggest-ghost/hot-index` 事件的载荷——跨会话历史热度快照。

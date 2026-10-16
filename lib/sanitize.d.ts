@@ -23,3 +23,7 @@ export declare function hasCJK(text: string): boolean;
 export declare function hasCyrillic(text: string): boolean;
 /** 判定净化后的输出是否应丢弃（返回 true = 无建议）。 */
 export declare function shouldFilterSuggestion(text: string): boolean;
+/** 续写场景的过滤：比建议场景更宽松，问句/感谢/助手口吻在续写语境下是合理续写。 */
+export declare function shouldFilterCompletion(text: string): boolean;
+/** 剥离续写输出中对草稿的回显（避免重复用户已输入的内容）。 */
+export declare function stripDraftEcho(completion: string, draft: string): string;

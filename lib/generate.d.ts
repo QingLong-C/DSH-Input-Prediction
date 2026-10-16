@@ -25,6 +25,14 @@ export interface Config {
     acceptKey?: string;
     /** LLM 下一条建议开关（默认开）；关闭后每回合不再调用建议模型。 */
     llmEnabled?: boolean;
+    /** 停顿续写开关（默认开）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
+    inlineEnabled?: boolean;
+    /** 续写可见字符上限。 */
+    inlineMaxChars?: number;
+    /** 是否启用长会话上下文摘要（默认开）。 */
+    contextSummaryEnabled?: boolean;
+    /** 上下文摘要最大字符数。 */
+    contextSummaryChars?: number;
 }
 /**
  * 0.1.7 的用户可调项。
@@ -43,6 +51,10 @@ export interface EditableConfig {
     acceptKey?: Volatile<string> | string;
     languageMode?: Volatile<string> | string;
     uiLocaleWeight?: Volatile<number> | number;
+    inlineEnabled?: Volatile<boolean> | boolean;
+    inlineDelayMs?: Volatile<number> | number;
+    inlineMinChars?: Volatile<number> | number;
+    inlineMaxChars?: Volatile<number> | number;
 }
 /** 内核解析后的插件配置：策略字段是裸值，可调字段是引用。 */
 export type ResolvedPluginConfig = Config & EditableConfig;
@@ -57,6 +69,12 @@ export type FlatConfig = Config & {
     acceptKey: string;
     languageMode: string;
     uiLocaleWeight: number;
+    inlineEnabled: boolean;
+    inlineDelayMs: number;
+    inlineMinChars: number;
+    inlineMaxChars: number;
+    contextSummaryEnabled: boolean;
+    contextSummaryChars: number;
 };
 /**
  * 把插件配置拍平成「策略 + 可调」的裸值视图。0.1.7 的可调项是引用，其余代码
@@ -69,10 +87,14 @@ export declare function resolveConfig(config: Config): Config;
 export declare function systemPrompt(maxSuggestionChars: number, language: string): string;
 /**
  * 从会话日志构建模型可见转录：最近 `maxRecentTurns` 个已完成回合的
- * user/assistant 消息（默认 1 = 只取最后一轮），脱敏，依次按字符预算
+ * user/assistant 消息（默认 3），脱敏，依次按字符预算
  * （`maxTranscriptChars`）与 UTF-8 字节预算（`maxInputBytes`）截尾。
+ *
+ * 长会话上下文摘要（`contextSummaryEnabled` 开启时）：被裁剪掉的旧消息会
+ * 被提取摘要（取每条用户消息的第一句），作为特殊对 prepend 到转录头部，
+ * 让模型看到早期已确认的目标、偏好、约束，避免长会话建议质量随长度下降。
  */
-export declare function buildTranscript(session: Session, maxRecentTurns: number, maxTranscriptChars: number, maxInputBytes: number): Transcript | undefined;
+export declare function buildTranscript(session: Session, maxRecentTurns: number, maxTranscriptChars: number, maxInputBytes: number, contextSummaryEnabled?: boolean, contextSummaryChars?: number): Transcript | undefined;
 /**
  * 为一个已完成回合生成建议。模型产出空或不合格回复 = 无建议（静默返回
  * undefined），真实失败抛错。
@@ -84,6 +106,20 @@ export declare function buildTranscript(session: Session, maxRecentTurns: number
  */
 export declare function generateSuggestion(ctx: Context, config: Config, session: Session, turn: number, signal: AbortSignal, uiLocale?: string, languageMode?: string, uiLocaleWeight?: number, lastLanguage?: string): Promise<{
     suggestion: SuggestGhostSuggested | undefined;
+    language: string;
+}>;
+/**
+ * 为草稿停顿生成行内续写。模型产出空或不合格回复 = 无续写（静默返回 undefined），
+ * 真实失败抛错。
+ *
+ * 与 `generateSuggestion` 的关键差异：
+ * 1. 输入是草稿文本（非会话转录），可选附带少量上下文（最近 2 轮）
+ * 2. 重试更少（maxAttempts 2，退避 800ms）——续写是低延迟交互，不值得长时间重试
+ * 3. 过滤更轻（`shouldFilterCompletion` 不过滤问句/助手口吻——续写语境下合理）
+ * 4. 剥除草稿回声（模型有时会复述草稿再续写）
+ */
+export declare function generateCompletion(ctx: Context, config: Config, session: Session, draft: string, signal: AbortSignal, uiLocale?: string, languageMode?: string, uiLocaleWeight?: number, lastLanguage?: string): Promise<{
+    text: string | undefined;
     language: string;
 }>;
 export { PROJECTION_KEY };
