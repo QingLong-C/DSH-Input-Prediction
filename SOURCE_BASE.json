@@ -1,6 +1,6 @@
 {
   "package": "dsh-suggest-ghost",
-  "local_version": "0.5.1-cn.3",
+  "local_version": "0.5.1-cn.4",
   "upstream_repository": "https://github.com/dsh-plugin-collection/dsh-suggest-ghost",
   "upstream_commit": "5489126f536665b1d3723b3d9343cc08c5612efc",
   "license": "MIT",
@@ -24,5 +24,7 @@
     "display_name": "DSH-Input Prediction",
     "technical_package": "dsh-suggest-ghost",
     "compatibility": "The technical package name, entry id, settings namespace, projection, events and browser storage keys are preserved so an existing installation can be updated in place."
-  }
+  },
+  "original_upstream_commit": "5489126f536665b1d3723b3d9343cc08c5612efc",
+  "last_auto_sync": "2026-10-16T14:46:08.210409+00:00"
 }

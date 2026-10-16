@@ -1,6 +1,6 @@
 {
   "name": "dsh-suggest-ghost",
-  "version": "0.5.1-cn.3",
+  "version": "0.5.1-cn.4",
   "description": "回复结束后，在 DSH 输入框里用灰字建议下一句。支持中文追问，Tab 填入草稿，Enter 由你发送。",
   "author": "WuJiaoJue",
   "license": "MIT",
