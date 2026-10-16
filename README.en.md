@@ -73,7 +73,7 @@ For a manual live regression (billable API requests), set `PREDICTION_BASE_URL` 
 
 Installation and live Chinese conversations have been tested on **DSh desktop `0.2.0-rc.2`**, including suggestion display, Tab acceptance, Enter submission, Esc dismissal, and hiding while typing. Other versions remain unverified.
 
-Automated checks cover the build, 40 custom regression tests, seven baseline smoke-test groups, and synchronization tests. They do not replace desktop interaction or live-model verification.
+Automated checks cover the build, 42 custom regression tests, seven baseline smoke-test groups, and synchronization tests. They do not replace desktop interaction or live-model verification.
 
 Requires Node.js `^22.19 || >=24` and pnpm:
 
