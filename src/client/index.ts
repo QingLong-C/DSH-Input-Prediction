@@ -1064,8 +1064,10 @@ function applyBody(ctx: Context): void {
     }
     return svc
       .mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['_ops'], value: enriched }], 0)
-      .then(() => true)
-      .catch(() => false);
+      .then(
+        () => { console.log('[suggest-ghost] writeOps: mutate OK'); return true; },
+        (error: unknown) => { console.log('[suggest-ghost] writeOps: mutate FAILED:', String(error).slice(0, 200)); return false; },
+      );
   };
   /**
    * 停顿续写调度：草稿非空且达到阈值时，停止输入 inlineDelayMs 后向 host 发送
