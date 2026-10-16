@@ -916,6 +916,8 @@ function applyBody(ctx: Context): void {
 
   /** 缓存的上一次输入框查询结果（React 可能重建节点；isConnected 校验兜底）。 */
   let cachedComposer: HTMLElement | null = null;
+  /** 上次通过 isComposerElement 验证的输入框（composer 未变时跳过重复 DOM 属性检查）。 */
+  let validatedComposer: HTMLElement | null = null;
 
   /** 渲染幽灵 overlay。 */
   const render = (): void => {
@@ -952,14 +954,19 @@ function applyBody(ctx: Context): void {
     // 复用事件路径已有的 `isComposerElement` 判据（textarea 或 isContentEditable），
     // 两条路径对「什么算输入框」的定义必须一致，否则又会出现「事件侧不认、渲染侧
     // 却挂」的错配。
-    if (!isComposerElement(composer)) {
-      // 已经显示中的要收掉，并把指纹清空，否则回到可编辑形态时会被
-      // 「key 未变化」早退挡住，幽灵再也不出现。
-      if (shown !== null) {
-        overlay.hide();
-        shown = null;
+    // 如果 composer 与上次验证通过的相同，跳过 isComposerElement 检查
+    // （DOM 属性读取：closest/matches/isContentEditable）。
+    if (composer !== validatedComposer) {
+      if (!isComposerElement(composer)) {
+        // 已经显示中的要收掉，并把指纹清空，否则回到可编辑形态时会被
+        // 「key 未变化」早退挡住，幽灵再也不出现。
+        if (shown !== null) {
+          overlay.hide();
+          shown = null;
+        }
+        return;
       }
-      return;
+      validatedComposer = composer;
     }
     cachedComposer = composer;
     overlay.attach(composer);
