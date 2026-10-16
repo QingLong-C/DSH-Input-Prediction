@@ -1,6 +1,6 @@
 {
   "package": "dsh-suggest-ghost",
-  "local_version": "0.5.1-cn.6",
+  "local_version": "0.5.1-cn.9",
   "upstream_repository": "https://github.com/dsh-plugin-collection/dsh-suggest-ghost",
   "upstream_commit": "5489126f536665b1d3723b3d9343cc08c5612efc",
   "license": "MIT",
@@ -15,7 +15,9 @@
     "Exclude injected rule, skill, runtime and time messages from prediction transcripts so real user intent and language survive the budget.",
     "Read live options from authoritative settings documents after UI changes and dispose root settings listeners with the plugin.",
     "Rebuild host/browser artifacts and add focused filter, runtime, client and host regression tests.",
-    "Use DSH-Input Prediction as the display name through exported locale metadata; retain the original technical package, settings, event and cache identities for existing installations."
+    "Use DSH-Input Prediction as the display name through exported locale metadata; retain the original technical package, settings, event and cache identities for existing installations.",
+    "Reject suggestion URLs not copied exactly from user messages, independently of model approval.",
+    "Require grounded intent evidence and reject unsupported concrete values, paths, accounts and model identifiers."
   ],
   "verification_scope": "Build, seven upstream smoke groups and Chinese suggestion regression tests; live DSH installation and model verification are recorded separately.",
   "display_name": "DSH-Input Prediction",
