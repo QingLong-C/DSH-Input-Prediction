@@ -37,6 +37,8 @@ export interface PluginConfigValues {
     timeoutMs: Volatile<number>;
     maxRecentTurns: Volatile<number>;
     maxTranscriptChars: Volatile<number>;
+    contextSummaryEnabled: Volatile<boolean>;
+    contextSummaryChars: Volatile<number>;
     maxSuggestionChars: Volatile<number>;
     provider: Volatile<string>;
     model: Volatile<string>;
@@ -45,6 +47,10 @@ export interface PluginConfigValues {
     historyCrossSession: Volatile<boolean>;
     historyMaxEntries: Volatile<number>;
     historyMinChars: Volatile<number>;
+    inlineEnabled: Volatile<boolean>;
+    inlineDelayMs: Volatile<number>;
+    inlineMinChars: Volatile<number>;
+    inlineMaxChars: Volatile<number>;
     wordAccept: Volatile<boolean>;
     acceptKey: Volatile<string>;
     languageMode: Volatile<string>;
@@ -67,10 +73,14 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     maxOutputTokens: z<number, number, "volatile-defined">;
     /** 辅助请求端到端截止时间（毫秒）。 */
     timeoutMs: z<number, number, "volatile-defined">;
-    /** 转录尾部保留的最近完成回合数（默认 1：只取最后一轮）。 */
+    /** 转录尾部保留的最近完成回合数（默认 3：保留近期上下文）。 */
     maxRecentTurns: z<number, number, "volatile-defined">;
     /** 转录字符预算。 */
     maxTranscriptChars: z<number, number, "volatile-defined">;
+    /** 是否启用长会话上下文摘要（默认开）：旧消息被裁剪时提取摘要保留关键信息。 */
+    contextSummaryEnabled: z<boolean, boolean, "volatile-defined">;
+    /** 上下文摘要最大字符数（仅 contextSummaryEnabled 时生效）。 */
+    contextSummaryChars: z<number, number, "volatile-defined">;
     /** 建议可见字符上限。 */
     maxSuggestionChars: z<number, number, "volatile-defined">;
     /**
@@ -90,6 +100,14 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     historyMaxEntries: z<number, number, "volatile-defined">;
     /** 草稿至少输入多少字符才触发历史补全。 */
     historyMinChars: z<number, number, "volatile-defined">;
+    /** 停顿续写开关（默认开）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
+    inlineEnabled: z<boolean, boolean, "volatile-defined">;
+    /** 停顿多久后触发续写（毫秒）。 */
+    inlineDelayMs: z<number, number, "volatile-defined">;
+    /** 草稿至少输入多少字符才触发续写。 */
+    inlineMinChars: z<number, number, "volatile-defined">;
+    /** 续写可见字符上限。 */
+    inlineMaxChars: z<number, number, "volatile-defined">;
     /** 幽灵显示时允许 → 逐词采纳。 */
     wordAccept: z<boolean, boolean, "volatile-defined">;
     /** 采纳建议的输入框快捷键（默认 Tab）。 */
@@ -127,10 +145,14 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     maxOutputTokens: z<number, number, "volatile-defined">;
     /** 辅助请求端到端截止时间（毫秒）。 */
     timeoutMs: z<number, number, "volatile-defined">;
-    /** 转录尾部保留的最近完成回合数（默认 1：只取最后一轮）。 */
+    /** 转录尾部保留的最近完成回合数（默认 3：保留近期上下文）。 */
     maxRecentTurns: z<number, number, "volatile-defined">;
     /** 转录字符预算。 */
     maxTranscriptChars: z<number, number, "volatile-defined">;
+    /** 是否启用长会话上下文摘要（默认开）：旧消息被裁剪时提取摘要保留关键信息。 */
+    contextSummaryEnabled: z<boolean, boolean, "volatile-defined">;
+    /** 上下文摘要最大字符数（仅 contextSummaryEnabled 时生效）。 */
+    contextSummaryChars: z<number, number, "volatile-defined">;
     /** 建议可见字符上限。 */
     maxSuggestionChars: z<number, number, "volatile-defined">;
     /**
@@ -150,6 +172,14 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     historyMaxEntries: z<number, number, "volatile-defined">;
     /** 草稿至少输入多少字符才触发历史补全。 */
     historyMinChars: z<number, number, "volatile-defined">;
+    /** 停顿续写开关（默认开）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
+    inlineEnabled: z<boolean, boolean, "volatile-defined">;
+    /** 停顿多久后触发续写（毫秒）。 */
+    inlineDelayMs: z<number, number, "volatile-defined">;
+    /** 草稿至少输入多少字符才触发续写。 */
+    inlineMinChars: z<number, number, "volatile-defined">;
+    /** 续写可见字符上限。 */
+    inlineMaxChars: z<number, number, "volatile-defined">;
     /** 幽灵显示时允许 → 逐词采纳。 */
     wordAccept: z<boolean, boolean, "volatile-defined">;
     /** 采纳建议的输入框快捷键（默认 Tab）。 */
@@ -182,7 +212,7 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     _push: z<string, string, "volatile-defined">;
 }>>, "plain">;
 export declare const Config: z<Schemastery.TypeS<typeof ConfigSchema>, PluginConfigValues>;
-/** 所需服务：LLM 路由 + 会话存储。 */
+/** 所需服务：LLM 路由 + 会话存储 + 设置服务。 */
 export declare const inject: string[];
 /** 插件名（与 cordis 条目 id 及 manifest 一致）。 */
 export declare const name = "dsh-suggest-ghost";

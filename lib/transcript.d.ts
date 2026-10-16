@@ -55,3 +55,17 @@ export declare function suggestionLanguage(pairs: readonly TranscriptPair[], uiL
 export declare function hasCJK(text: string): boolean;
 /** 检测文本是否含西里尔字母（俄语等）。@deprecated 保留给外部调用者，内部已改用 countScripts。 */
 export declare function hasCyrillic(text: string): boolean;
+/**
+ * 从旧转录对中提取摘要（零 LLM 成本的启发式方法）。
+ *
+ * 策略：
+ * 1. 只取用户消息（assistant 回复通常是格式化输出，信息密度低）；
+ * 2. 每条消息取第一句（句号/问号/感叹号/换行截断）；
+ * 3. 按字符预算从旧到新拼接，超限则截断最后一条；
+ * 4. 返回带前缀的摘要文本，供模型阅读。
+ *
+ * @param pairs - 将被裁剪掉的旧转录对
+ * @param maxChars - 摘要最大字符数
+ * @returns 摘要文本（空串表示无可提取内容）
+ */
+export declare function extractContextSummary(pairs: readonly TranscriptPair[], maxChars: number): string;
