@@ -27,19 +27,6 @@ export interface Transcript {
   readonly baseSeq: number;
 }
 
-/** 预算内保留最新若干对；至少保留最新一对。 */
-function keepTail(pairs: readonly TranscriptPair[], budget: number): number {
-  let remaining = budget;
-  let kept = 0;
-  for (const pair of [...pairs].reverse()) {
-    const cost = pair.role.length + pair.text.length + 2;
-    if (cost > remaining && kept > 0) break;
-    kept += 1;
-    remaining -= cost;
-  }
-  return Math.max(1, kept);
-}
-
 /** 把字符串截断到不超过 `maxBytes` 个 UTF-8 字节；按码点遍历，不劈裂多字节字符。 */
 export function truncateToUtf8(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
@@ -63,45 +50,53 @@ export function frameTranscript(pairs: readonly TranscriptPair[]): string {
   return blocks.join('\n\n');
 }
 
-/**
- * 转录双预算裁剪（纯函数，可单测）：
- * ① 字符预算（`maxTranscriptChars`）：从最新往回保留，至少最新一对；
- * ② UTF-8 字节预算（`maxInputBytes`）：从最老一对开始丢弃（至少保留最新一对），
- *    单对本身超限时对文本做字节级截断（不劈裂多字节字符）。
- * 源消息 seq 与 pairs 同步裁剪。
- */
+/** Preserve user intent before older assistant prose; clip long text at both ends. */
 export function trimTranscript(
   pairs: readonly TranscriptPair[],
   sourceMessageSeqs: readonly number[],
   maxTranscriptChars: number,
   maxInputBytes: number,
 ): TrimmedTranscript {
-  if (pairs.length === 0) return { pairs: [], sourceMessageSeqs: [] };
-  // ① 字符预算截尾（原语义）。
-  const keptCount = keepTail(pairs, Math.max(1, maxTranscriptChars));
-  const charKept = pairs.slice(pairs.length - keptCount);
-  const charSeqs = sourceMessageSeqs.slice(sourceMessageSeqs.length - keptCount);
-  // ② 字节预算截尾：防中文长内容突破 maxInputBytes 后整轮失败。
-  const sizeOf = (ps: readonly TranscriptPair[]): number => Buffer.byteLength(frameTranscript(ps), 'utf8');
-  let kept = charKept.length;
-  while (kept > 1 && sizeOf(charKept.slice(charKept.length - kept)) > Math.max(1, maxInputBytes)) {
-    kept -= 1;
-  }
-  const clipped = charKept.slice(charKept.length - kept);
-  const seqs = charSeqs.slice(charSeqs.length - kept);
-  if (sizeOf(clipped) <= Math.max(1, maxInputBytes)) {
-    return { pairs: clipped, sourceMessageSeqs: seqs };
-  }
-  // 仅剩的最新一对都超限 → 对最新文本按字节截断（预算先扣掉其余对的字节开销，
-  // 再扣角色名与分隔标签的近似开销）。
-  const last = clipped[clipped.length - 1]!;
-  const rest = clipped.slice(0, -1);
-  const restBytes = sizeOf(rest);
-  const textBudget = Math.max(1, maxInputBytes - restBytes - Buffer.byteLength(last.role, 'utf8') - 16);
-  return {
-    pairs: [...rest, { role: last.role, text: truncateToUtf8(last.text, textBudget) }],
-    sourceMessageSeqs: seqs,
+  const rows = pairs.map((pair, index) => ({ ...pair, seq: sourceMessageSeqs[index] ?? 0 }));
+  const byteLimit = Math.max(1, maxInputBytes);
+  const charLimit = Math.max(1, maxTranscriptChars);
+  const fits = () => {
+    const framed = frameTranscript(rows);
+    return framed.length <= charLimit && Buffer.byteLength(framed, 'utf8') <= byteLimit;
   };
+  // Keep the latest reply and user messages; discard older assistant detail first.
+  while (!fits()) {
+    const index = rows.findIndex((row, i) => i < rows.length - 1 && row.role === 'assistant');
+    if (index < 0) break;
+    rows.splice(index, 1);
+  }
+  if (!fits()) {
+    // Summaries are secondary to actual user messages, and are marked with seq 0.
+    const summary = rows.findIndex(row => row.seq === 0);
+    if (summary >= 0 && rows.length > 1) rows.splice(summary, 1);
+  }
+  while (!fits() && rows.length > 0) {
+    const framed = frameTranscript(rows);
+    const excess = Math.max(Buffer.byteLength(framed, 'utf8') - byteLimit, framed.length - charLimit);
+    let index = 0;
+    for (let i = 1; i < rows.length; i++) {
+      if (Buffer.byteLength(rows[i]!.text, 'utf8') > Buffer.byteLength(rows[index]!.text, 'utf8')) index = i;
+    }
+    const row = rows[index]!;
+    const current = Buffer.byteLength(row.text, 'utf8');
+    if (current === 0) { rows.shift(); continue; }
+    const budget = Math.max(0, current - Math.max(excess, Math.ceil(current / 4)));
+    const marker = '\n[…]\n';
+    if (budget < 32) {
+      row.text = truncateToUtf8(row.text, budget);
+    } else {
+      const left = Math.floor((budget - Buffer.byteLength(marker)) / 2);
+      const head = truncateToUtf8(row.text, left);
+      const tail = Array.from(truncateToUtf8(Array.from(row.text).reverse().join(''), budget - Buffer.byteLength(marker) - Buffer.byteLength(head))).reverse().join('');
+      row.text = head + marker + tail;
+    }
+  }
+  return { pairs: rows.map(({ role, text }) => ({ role, text })), sourceMessageSeqs: rows.map(row => row.seq) };
 }
 
 /**

@@ -9,6 +9,7 @@ DSH-Input Prediction is a next-message suggestion plugin for the DSh desktop cli
 ## Features
 
 - Generates suggestions after the complete response; no speculative suggestions appear during reasoning or response generation.
+- Preserves user goals before older assistant prose and checks candidate intent independently. Assistant offers are not treated as user decisions; uncertain suggestions are withheld.
 - Supports automatic language detection and an explicit Simplified Chinese setting.
 - Fills the draft only when accepted; never sends a message automatically.
 - Hides suggestions when typing and clears stale suggestions when a new turn starts.
@@ -51,7 +52,7 @@ Use this repository's release archives. The package with the same name on npm is
 
 ## Models and data
 
-By default, suggestions use the conversation's provider and model; a separate provider and model can be selected in plugin settings. Predictions make additional model requests and consume the selected service's quota or incur its charges.
+By default, suggestions use the conversation's provider and model; a separate provider and model can be selected in plugin settings. Each prediction makes a generation request. A valid candidate requires a second, independent intent-check request; rejected or failed checks withhold the candidate. Both requests consume the selected service's quota or incur its charges, and the extra check adds latency.
 
 Recent conversation content is sent to that service. Suggestions may not match the user's intent and may be absent after errors, timeouts, or invalid output. Latency depends on the model and network. The released version waits for the response to finish; experimental prefetching is not enabled.
 
@@ -67,7 +68,7 @@ Releases do not install themselves on your computer. Run a manual check from [Ac
 
 Installation and live Chinese conversations have been tested on **DSh desktop `0.2.0-rc.2`**, including suggestion display, Tab acceptance, Enter submission, Esc dismissal, and hiding while typing. Other versions remain unverified.
 
-Automated checks cover the build, 34 custom regression tests, seven baseline smoke-test groups, and synchronization tests. They do not replace desktop interaction or live-model verification.
+Automated checks cover the build, 40 custom regression tests, seven baseline smoke-test groups, and synchronization tests. They do not replace desktop interaction or live-model verification.
 
 Requires Node.js `^22.19 || >=24` and pnpm:
 

@@ -24,3 +24,14 @@ test('injected user-role context cannot evict the real Chinese question from the
   assert.deepEqual(transcript.sourceMessageSeqs,[2,5]);
   assert.equal(suggestionLanguage(transcript.pairs,'zh'),'简体中文');
 });
+
+test('long assistant replies cannot evict the user goal or latest question', async () => {
+  const { trimTranscript, frameTranscript } = await import('../lib/transcript.js');
+  const pairs=[{role:'user',text:'先了解这个项目，不要改配置。'},{role:'assistant',text:'项目说明。'.repeat(1500)},{role:'user',text:'它能省 token 吗？'},{role:'assistant',text:'详细说明。'.repeat(1500)+'最终结论：这是输入辅助功能。'}];
+  const trimmed=trimTranscript(pairs,[1,2,3,4],12000,4096);
+  assert.ok(trimmed.pairs.some(p=>p.text===pairs[0].text));
+  assert.ok(trimmed.pairs.some(p=>p.text===pairs[2].text));
+  assert.ok(trimmed.pairs.at(-1).text.endsWith('最终结论：这是输入辅助功能。'));
+  assert.ok(Buffer.byteLength(frameTranscript(trimmed.pairs))<=4096);
+  assert.equal(trimmed.pairs.length,trimmed.sourceMessageSeqs.length);
+});

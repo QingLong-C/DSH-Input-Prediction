@@ -27,13 +27,7 @@ export interface Transcript {
 export declare function truncateToUtf8(text: string, maxBytes: number): string;
 /** 组装带标签块供模型阅读。 */
 export declare function frameTranscript(pairs: readonly TranscriptPair[]): string;
-/**
- * 转录双预算裁剪（纯函数，可单测）：
- * ① 字符预算（`maxTranscriptChars`）：从最新往回保留，至少最新一对；
- * ② UTF-8 字节预算（`maxInputBytes`）：从最老一对开始丢弃（至少保留最新一对），
- *    单对本身超限时对文本做字节级截断（不劈裂多字节字符）。
- * 源消息 seq 与 pairs 同步裁剪。
- */
+/** Preserve user intent before older assistant prose; clip long text at both ends. */
 export declare function trimTranscript(pairs: readonly TranscriptPair[], sourceMessageSeqs: readonly number[], maxTranscriptChars: number, maxInputBytes: number): TrimmedTranscript;
 /**
  * 建议回复语言：结合 UI 界面语言与最近用户消息的文字系统分布加权推断。

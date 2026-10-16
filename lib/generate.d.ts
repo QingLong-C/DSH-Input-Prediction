@@ -5,6 +5,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Volatile } from '@deepseek-ai/cosmokit';
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import type { Session } from '@deepseek-ai/dsh-session';
 import { PROJECTION_KEY } from './domain.js';
 import type { SuggestGhostSuggested } from './domain.js';
@@ -85,6 +86,8 @@ export declare function flattenConfig(config: ResolvedPluginConfig): FlatConfig;
 export declare function resolveConfig(config: Config): Config;
 /** 建议生成指令：只预测用户下一条提示词，禁止生成内容或元文本。 */
 export declare function systemPrompt(maxSuggestionChars: number, language: string): string;
+/** Separate intent check: an assistant offer must not become invented user consent. */
+export declare function verifySuggestion(ctx: Context, options: GenerateOptions, transcript: Transcript, candidate: string): Promise<boolean>;
 /**
  * 从会话日志构建模型可见转录：最近 `maxRecentTurns` 个已完成回合的
  * 真实用户/assistant 消息（默认 3），脱敏，依次按字符预算
