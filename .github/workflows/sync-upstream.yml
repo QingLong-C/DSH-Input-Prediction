@@ -1,0 +1,104 @@
+name: Sync upstream and release
+
+on:
+  schedule:
+    # 09:17 and 21:17 Asia/Shanghai (GitHub cron uses UTC).
+    - cron: '17 1,13 * * *'
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: 'Rebuild and release even if upstream has no changes'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Test merge logic
+        run: python3 scripts/test-sync-upstream.py
+      - name: Merge upstream changes
+        id: sync
+        env:
+          REBUILD: ${{ inputs.rebuild }}
+        run: |
+          echo "base=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ "$REBUILD" = true ]; then
+            python3 scripts/sync-upstream.py --force
+          else
+            python3 scripts/sync-upstream.py
+          fi
+      - name: Install locked dependencies
+        run: |
+          npm install --global pnpm@10.33.2
+          pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build and run regression tests
+        run: |
+          pnpm build
+          pnpm test:cn
+          pnpm test:smoke
+          node --experimental-strip-types scripts/context-summary-smoke.mjs
+          python3 scripts/test-sync-upstream.py
+      - name: Commit candidate and verify installable package
+        env:
+          CHANGED: ${{ steps.sync.outputs.changed }}
+          BASE_SHA: ${{ steps.sync.outputs.base }}
+          ARTIFACT_DIR: ${{ runner.temp }}/release
+        run: |
+          git diff --check
+          if [ "$CHANGED" = true ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add --all
+            git commit -m "Sync upstream and release $(node -p 'JSON.parse(require("fs").readFileSync("package.json")).version')"
+          else
+            git diff --exit-code
+            test -z "$(git status --porcelain)"
+          fi
+          mkdir -p "$ARTIFACT_DIR"
+          npm pack --json --pack-destination "$ARTIFACT_DIR"
+          python3 scripts/verify-release.py
+          git bundle create "$ARTIFACT_DIR/source.bundle" HEAD
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tested-release
+          path: ${{ runner.temp }}/release/
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # Execute only the publisher from this workflow's trusted commit, not the candidate bundle.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: tested-release
+          path: ${{ runner.temp }}/release
+      - name: Publish tested changes and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_DIR: ${{ runner.temp }}/release
+        run: python3 .github/scripts/publish-release.py
