@@ -1083,12 +1083,31 @@ function applyBody(ctx: Context): void {
     } catch {
       // payload 非 JSON，原样发送
     }
-    return svc
-      .mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['_ops'], value: enriched }], 0)
-      .then(
-        () => { console.log('[suggest-ghost] writeOps: mutate OK'); return true; },
-        (error: unknown) => { console.log('[suggest-ghost] writeOps: mutate FAILED:', String(error).slice(0, 200)); return false; },
-      );
+    // 写 CAS：先 describe 拿当前 revision，再按该 revision 提交 mutate。
+    // **不能传常量 0**——文档 revision 一旦 >0，expected=0 的写入会被内核按
+    // 版本冲突拒绝；若远程层不抛错则表现为「mutate OK 但值从未落盘」的假成功。
+    const doWrite = (attempt: number): Promise<boolean> =>
+      svc
+        .describe()
+        .then((described) => {
+          const list = unwrapSettingsDoc(described)?.namespaces ?? [];
+          const row = list.find((r) => r.ns === SETTINGS_NAMESPACE) as { revision?: number } | undefined;
+          const rev = typeof row?.revision === 'number' ? row.revision : 0;
+          return svc.mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['_ops'], value: enriched }], rev);
+        })
+        .then(
+          () => { console.log('[suggest-ghost] writeOps: mutate OK'); return true; },
+          (error: unknown) => {
+            // 版本冲突（host 自写 _push 会频繁推进 revision）：重取 revision 重试一次。
+            if (attempt < 2 && /conflict|revision/i.test(String(error))) {
+              console.log(`[suggest-ghost] writeOps: conflict, retry ${attempt + 1}`);
+              return doWrite(attempt + 1);
+            }
+            console.log('[suggest-ghost] writeOps: mutate FAILED:', String(error).slice(0, 200));
+            return false;
+          },
+        );
+    return doWrite(0);
   };
   /**
    * 停顿续写调度：草稿非空且达到阈值时，停止输入 inlineDelayMs 后向 host 发送
