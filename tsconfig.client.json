@@ -1,0 +1,31 @@
+// ⚠️ 这是一份**诊断用**配置，尚未接入 `pnpm typecheck`（接了会把构建卡死）。
+// 它当前报 31 条错误，分两类：
+//   ① 依赖缺失的噪音 6 条——本包没有 @types/react，且
+//      `@deepseek-ai/dsh-client-ui-conversation` 不在依赖里（TS2307/TS7016/
+//      TS6142/TS5097）。补齐这两个 devDep 后即可消掉。
+//   ② 真实代码问题 ~25 条——因为 src/client 被根配置 exclude、**从来没有被类型
+//      检查过**而长期潜伏，例如 `remote.settings.mutate` 少传一个参数（被
+//      .catch 吞成 false）、`ctx.on('connection/reset')` 不是合法事件名（重连后
+//      永不重新首读）、把 sessions getter 当 store 对象调 getSnapshot/subscribe。
+// 保留本文件的目的：修 ① 之后就能当门禁，防止再出现 `scrollHost` 那类
+// 「未声明标识符直接进产物」的回归（见下方 compilerOptions 注释）。
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.json",
+
+  "compilerOptions": {
+    // 浏览器入口需要 DOM lib（根配置 lib 只有 ES2023、types 只有 node，
+    // 所以它当初被 exclude 掉了——代价是 src/client 从此再没有任何静态检查，
+    // 一个未声明变量 `scrollHost` 因此直接进了产物，运行时抛
+    // `ReferenceError: scrollHost is not defined`，把每次 composer 新挂载后的
+    // 第一次幽灵渲染整个吞掉。这份配置的存在就是为了堵死这一类回归。）
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": [],
+    "noEmit": true
+  },
+  "include": ["src/client/**/*.ts"],
+  // 必须显式清空：`extends` 会继承根配置的 `exclude: ["src/client"]`，
+  // 不清空的话这份配置会一个文件都不检查，等于白写。
+  "exclude": []
+}
+
