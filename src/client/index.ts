@@ -743,33 +743,12 @@ function applyBody(ctx: Context): void {
   const loadFromCache = (): CachedData => {
     try {
       const raw = localStorage.getItem(CACHE_KEY);
-      if (raw === null) {
-        console.log('[suggest-ghost] localStorage cache: EMPTY (first run)');
-        return {};
-      }
-      const data = JSON.parse(raw) as CachedData;
-      console.log('[suggest-ghost] localStorage cache: LOADED', {
-        hot: data.hot?.length ?? 0,
-        history: data.history?.length ?? 0,
-        hasSuggestion: !!data.suggestion,
-      });
-      return data;
-    } catch (e) {
-      console.log('[suggest-ghost] localStorage cache: PARSE ERROR', e);
-      return {};
-    }
+      if (raw === null) return {};
+      return JSON.parse(raw) as CachedData;
+    } catch { return {}; }
   };
   const saveToCache = (data: CachedData): void => {
-    try {
-      localStorage.setItem(CACHE_KEY, JSON.stringify(data));
-      console.log('[suggest-ghost] localStorage cache: SAVED', {
-        hot: data.hot?.length ?? 0,
-        history: data.history?.length ?? 0,
-        hasSuggestion: !!data.suggestion,
-      });
-    } catch (e) {
-      console.log('[suggest-ghost] localStorage cache: SAVE ERROR', e);
-    }
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch { /* quota exceeded */ }
   };
   // 启动时立即从缓存恢复，让插件在 host RPC 完成前就有数据可用。
   const cached = loadFromCache();
