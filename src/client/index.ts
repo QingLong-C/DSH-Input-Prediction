@@ -930,6 +930,11 @@ function applyBody(ctx: Context): void {
     // 逐字相符且属于当前会话），其次历史前缀补全（即时、无网络）。
     if (draft.trim() !== '' && settings.inlineEnabled) {
       const completion = settings.completion;
+      if (completion === null || completion === undefined
+        || settings.completionSessionId !== currentId
+        || completion.draft !== draft) {
+        console.log(`[suggest-ghost] completion not shown: has=${completion != null}, sidMatch=${settings.completionSessionId === currentId}, draftMatch=${completion != null && completion.draft === draft}${completion != null ? `, want=${JSON.stringify(completion.draft.slice(0, 24))}, have=${JSON.stringify(draft.slice(0, 24))}` : ''}`);
+      }
       if (completion !== null && completion !== undefined
         && settings.completionSessionId !== null && settings.completionSessionId === currentId
         && completion.draft === draft && completion.text !== '') {
@@ -1258,6 +1263,7 @@ function applyBody(ctx: Context): void {
           if (typeof v._push === 'string' && v._push !== '') {
             try {
               pushed = JSON.parse(v._push) as typeof pushed;
+              console.log(`[suggest-ghost] _push arrived: rev=${(pushed as { rev?: number }).rev}, completion=${(pushed?.completion !== undefined ? 'YES' : 'no')}, completionSid=${JSON.stringify(pushed?.completionSessionId ?? null)}`);
             } catch {
               pushed = null;
             }
