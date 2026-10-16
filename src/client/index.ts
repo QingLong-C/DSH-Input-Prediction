@@ -826,6 +826,8 @@ function applyBody(ctx: Context): void {
 
   /** 计算当前应显示的幽灵内容（null = 不显示）。结果按 (draft, settingsEpoch, composing, running, currentId) 缓存。 */
   const ghostContent = (currentId: string | undefined): { content: GhostContent | null; key: string | null } => {
+    // 双模式禁用：直接返回，跳过快照读取
+    if (!settings.historyEnabled && settings.suggestion === null) return { content: null, key: null };
     if (bound === null) return { content: null, key: null };
     if (composing) return { content: null, key: null }; // IME 组词中：组合预览与幽灵后缀重叠，抑制显示
     // 0.1.2 会话快照只余 lifecycle 字段；本插件用到的仅剩 `running`。
