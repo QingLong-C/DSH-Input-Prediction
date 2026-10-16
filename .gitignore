@@ -1,3 +1,5 @@
 node_modules
 *.tgz
 preview/
+__pycache__/
+*.pyc
