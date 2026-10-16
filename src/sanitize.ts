@@ -109,8 +109,22 @@ export function shouldFilterSuggestion(text: string): boolean {
   return false;
 }
 
-/** 续写场景的过滤（与 shouldFilterSuggestion 相同逻辑）。 */
-export const shouldFilterCompletion = shouldFilterSuggestion;
+/** 续写场景的过滤：比建议场景更宽松，问句/感谢/助手口吻在续写语境下是合理续写。 */
+export function shouldFilterCompletion(text: string): boolean {
+  if (text.length === 0) return true;
+  if (text.length > 200) return true; // 多句/过长回复
+  if (META_RE.test(text)) return true;
+  if (ERROR_ECHO_RE.test(text)) return true;
+  // 续写场景不过滤 THANKS_RE / ASSISTANT_VOICE_RE / QUESTION_RE
+  // 孤立单词：单个字符或纯标点/符号无信息量；2 字起保留
+  const words = text.split(/\s+/);
+  if (words.length === 1) {
+    const word = words[0]!;
+    if (word.length <= 1) return true;
+    if (/^[\p{P}\p{S}]+$/u.test(word)) return true;
+  }
+  return false;
+}
 
 /** 剥离续写输出中对草稿的回显（避免重复用户已输入的内容）。 */
 export function stripDraftEcho(completion: string, draft: string): string {
