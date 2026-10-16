@@ -56,41 +56,13 @@ By default, suggestions use the conversation's provider and model; a separate pr
 
 Recent conversation content is sent to that service. Suggestions may not match the user's intent and may be absent after errors, timeouts, or invalid output. Latency depends on the model and network. The released version waits for the response to finish; experimental prefetching is not enabled.
 
-## Updates
+## Model configuration
 
-GitHub Actions checks for upstream changes every **12 hours**, scheduled for **09:17 and 21:17 Asia/Shanghai**. Runs may be delayed by GitHub's queue.
+To use **DeepSeek V4.1 Flash**, enter your configured provider ID and set the model to `deepseek-v4.1-flash` in plugin settings. Candidate generation and intent verification use the same model. The provider ID depends on your DSh configuration.
 
-Updates are built and regression-tested on an isolated branch, then submitted as a PR, including a failed check if regression fails. Merge conflicts stop preparation. An existing upstream PR is preserved rather than overwritten or duplicated.
+## Compatibility
 
-**Accuracy comes first; no automatic merge.** The `Prediction regression` check and human approval are required; new commits dismiss stale approvals. Prediction, context, or model changes require reviewer-run DeepSeek V4.1 Flash comparisons on the same cases, including useful-suggestion coverage. Passing automated tests does not guarantee unchanged prediction accuracy.
-
-After merge to `main`, rebuild, retest, and verify before publishing a new archive. No changes means no PR or duplicate release. Publishing does not install the plugin on your computer. Manual runs from Actions only check for updates; they cannot bypass review. GitHub may disable schedules after 60 days of public-repository inactivity.
-
-
-Live-model regression uses **DeepSeek V4.1 Flash** (`deepseek-v4.1-flash`), without GPT. To pin prediction to this model, enter your configured DeepSeek provider ID and this model ID in plugin settings. Generation and intent verification use the same model. Provider IDs are installation-specific and are not embedded in the bundle.
-
-For a manual live regression (billable API requests), set `PREDICTION_BASE_URL` (including `/v1`) and `PREDICTION_API_KEY`, then run `pnpm build && node scripts/live-deepseek-regression.mjs`. The script uses synthetic conversations only and does not read private conversations or local credentials. Regular CI keeps using deterministic tests without API credentials.
-
-## Compatibility and development
-
-Installation and live Chinese conversations have been tested on **DSh desktop `0.2.0-rc.2`**, including suggestion display, Tab acceptance, Enter submission, Esc dismissal, and hiding while typing. Other versions remain unverified.
-
-Automated checks cover the build, 42 custom regression tests, seven baseline smoke-test groups, and synchronization tests. They do not replace desktop interaction or live-model verification.
-
-Requires Node.js `^22.19 || >=24` and pnpm:
-
-```bash
-git clone https://github.com/QingLong-C/DSH-Input-Prediction.git
-cd DSH-Input-Prediction
-pnpm install --frozen-lockfile
-pnpm build
-pnpm test:cn
-pnpm test:smoke
-node --experimental-strip-types scripts/context-summary-smoke.mjs
-pnpm test:sync
-```
-
-Rebuild `lib/` after editing source files, then install the project directory or a packaged `.tgz` through DSh's plugin manager.
+Compatible with DSh desktop `0.2.0-rc.2`. Compatibility with other versions depends on the client environment.
 
 ## License
 

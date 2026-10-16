@@ -58,44 +58,13 @@ DSh 需启用 `plugin_manager` 工具（通常在 Creator 模式下可用），A
 
 本项目优先保证上下文完整性。当前发布版本在回复结束后生成预测，未启用正文生成期间的实验性预预测机制。
 
-## 版本更新
+## 模型配置
 
-GitHub Actions 每 **12 小时**检查上游更新，计划执行时间为北京时间 **09:17、21:17**；实际执行可能受 GitHub 队列影响。
+如需使用 **DeepSeek V4.1 Flash**，在插件设置中填写已配置的服务商 ID，并将模型设为 `deepseek-v4.1-flash`。候选生成与意图核对使用同一模型；服务商 ID 由你的 DSh 配置决定。
 
-检测到上游新提交后，工作流准备独立候选分支、自动构建并运行回归，再创建 PR。即使回归失败，也会在 PR 标记失败；发生无法自动解决的合并冲突时停止并保留失败日志。已有待审 PR 时不覆盖它，也不重复创建。
+## 兼容性
 
-**准确性优先：不自动合并。** PR 必须通过 `Prediction regression` 检查并获得审查批准；新增提交会使旧批准失效。涉及预测、上下文或模型调用的改动，审查者还需使用 DeepSeek V4.1 Flash 对同一批案例做改动前后对照，并检查有效建议是否减少。自动测试通过不代表总体预测准确率不变。
-
-合并到 `main` 后重新构建、回归和校验，才发布新版本 `.tgz` 及 SHA256 文件；未通过审查或检查失败时保留现有 Release。没有上游更新不创建 PR，也不重复发布。GitHub 定时任务可能延迟，发布安装包不会自动更新你电脑上的插件。
-
-
-
-本项目的真实模型回归使用 **DeepSeek V4.1 Flash**（模型 ID：`deepseek-v4.1-flash`），不依赖 GPT。要固定预测模型，在插件设置里填写你已配置的 DeepSeek 服务商 ID 和该模型 ID；候选生成与意图核对使用同一模型。服务商 ID 因安装环境而异，不随安装包写死。
-
-手动运行真实模型回归（会调用接口并消耗额度）：先设置 `PREDICTION_BASE_URL`（包含 `/v1`）和 `PREDICTION_API_KEY` 环境变量，再运行 `pnpm build && node scripts/live-deepseek-regression.mjs`。脚本只使用合成对话，不读取私人会话或本机凭据；普通 CI 仍运行不需要密钥的确定性测试。
-
-## 兼容性与验证
-
-已在 **DSh 桌面客户端 `0.2.0-rc.2`** 上验证安装、中文对话预测、灰字显示、Tab 采纳、Enter 发送、Esc 忽略及输入时隐藏。其他客户端版本尚未完成实测。
-
-自动检查覆盖构建、42 项定制回归、7 组基础冒烟测试及同步流程测试。自动检查不替代客户端交互及真实模型验证。
-
-## 本地开发
-
-环境要求：Node.js `^22.19 || >=24`，pnpm。
-
-```bash
-git clone https://github.com/QingLong-C/DSH-Input-Prediction.git
-cd DSH-Input-Prediction
-pnpm install --frozen-lockfile
-pnpm build
-pnpm test:cn
-pnpm test:smoke
-node --experimental-strip-types scripts/context-summary-smoke.mjs
-pnpm test:sync
-```
-
-修改源码后需重新构建 `lib/`，再通过 DSh 插件管理器安装项目目录或打包后的 `.tgz`。
+适用于 DSh 桌面客户端 `0.2.0-rc.2`。其他客户端版本的兼容性需以实际使用情况为准。
 
 ## 许可证
 
