@@ -18,6 +18,18 @@ DSH-Input Prediction 是面向 DSh 桌面客户端的输入预测插件。AI 回
 
 ## 安装与升级
 
+### 通过 Agent 安装（推荐）
+
+复制以下指令并发送给 DSh Agent。GitHub 代码块右上角提供复制按钮；同一条指令也可用于升级。
+
+```text
+请将 DSH-Input Prediction 安装或升级到我的当前 DSh 配置：从 https://github.com/QingLong-C/DSH-Input-Prediction/releases/latest 获取最新正式版的 .tgz 安装包及 SHA256 校验文件，下载并验证校验值后，使用 DSh 原生 plugin_manager 工具安装并启用（install_bundle，target 为下载文件的绝对路径，enabled=true），保留已有设置，不安装 npm 同名包；完成后核对实际安装版本、启用状态及加载错误，告知结果，如需重启则明确说明，不能将“已下载”或“等待重启”报告为“已生效”。
+```
+
+DSh 需启用 `plugin_manager` 工具（通常在 Creator 模式下可用），Agent 才能直接执行安装。客户端要求的权限确认仍需按提示完成；覆盖升级可能需要退出并重新启动 DSh。其他 Agent 也可使用这段指令，但必须具备当前 DSh 配置的插件管理能力；工具不可用时，请使用下方手动安装方式。
+
+### 手动安装
+
 1. 从 [Releases](https://github.com/QingLong-C/DSH-Input-Prediction/releases/latest) 下载最新的 `.tgz` 安装包，无需解压。
 2. 在 DSh 中打开「插件」→「添加插件」，输入安装包的完整路径并安装。
 3. 首次安装后选择「立即启用」；覆盖升级后，请完整退出并重新启动 DSh。

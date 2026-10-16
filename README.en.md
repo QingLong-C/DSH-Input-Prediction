@@ -18,6 +18,18 @@ Only post-reply suggestions are enabled by default. History completion, paused i
 
 ## Installation
 
+### Install with an Agent (recommended)
+
+Copy the instruction below and send it to your DSh Agent. GitHub provides a copy button in the upper-right corner of the code block. The same instruction also handles upgrades.
+
+```text
+Install or upgrade DSH-Input Prediction in my current DSh profile: obtain the latest published stable release's .tgz archive and SHA256 checksum file from https://github.com/QingLong-C/DSH-Input-Prediction/releases/latest, download and verify the archive, then install and enable it with DSh's native plugin_manager tool (install_bundle, target set to the downloaded file's absolute path, enabled=true), preserving existing settings and avoiding the same-named npm package; verify the actual installed version, enabled state, and loading errors, report the outcome, and explicitly state whether a restart is required rather than reporting a download or a pending restart as successful activation.
+```
+
+DSh must expose the `plugin_manager` tool, normally available in Creator mode, for the Agent to install directly. Complete any permission prompts required by the client. Upgrades may require fully quitting and restarting DSh. Other Agents can use the instruction only if they can manage the current DSh profile; otherwise use the manual steps below.
+
+### Manual installation
+
 1. Download the latest `.tgz` from [Releases](https://github.com/QingLong-C/DSH-Input-Prediction/releases/latest). Do not extract it.
 2. Open **Plugins → Add plugin** in DSh and install using the archive's absolute path.
 3. Enable the plugin after first installation. Fully quit and restart DSh after an upgrade.
