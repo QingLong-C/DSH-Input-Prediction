@@ -1,91 +1,83 @@
+> 感谢 [OneHop](https://onehop.ai) 对本项目的赞助！OneHop 可为用户提供一枚兼容 OpenAI 协议的 API 密钥，即可调用上百款主流大模型，包括 GPT、Claude、Gemini、DeepSeek、Kimi 以及通义千问（Qwen）。你无需管理多家服务商账号，也不用反复修改代码，就能自由切换模型；并且采用按量付费模式。→ [onehop.ai](https://onehop.ai)
+
 # DSH-Input Prediction
 
-给 DSh 加一条「你可能接着想问的话」。AI 回复结束后，空输入框里会出现灰字建议：合适就按 **Tab** 收下，再按 **Enter** 发出去；不合适就自己写。
+DSH-Input Prediction 是面向 DSh 桌面客户端的输入预测插件。AI 回复结束后，插件根据近期对话生成下一条用户消息建议，并以灰色文字显示在空输入框中。支持中文追问、方案比较、下一步操作及简短确认。
 
-比如，你刚聊完内存大小，下一句可能是：
+[下载安装包](https://github.com/QingLong-C/DSH-Input-Prediction/releases/latest) · [问题反馈](https://github.com/QingLong-C/DSH-Input-Prediction/issues) · [English](README.en.md)
 
-> 那 8GB 内存够日常办公用吗？
+## 功能
 
-它只帮你准备下一句话，不会替你发送。
+- **回复后预测**：以完整回复为依据生成建议，不在思考或正文生成阶段展示未确认的候选。
+- **中文对话支持**：支持自动识别对话语言，也可在设置中指定简体中文。
+- **自主采纳**：建议仅填入草稿，不会自动发送；用户可以修改或忽略。
+- **输入保护**：开始输入后隐藏建议，新回合开始时清除旧建议，不覆盖已有草稿。
+- **独立插件安装**：通过 DSh 插件接口运行，无需修改客户端安装包。
 
-## 怎么用
+默认仅启用回复后的整句预测。历史补全、输入停顿续写及逐词采纳默认关闭，可按需在插件设置中启用。
 
-| 操作 | 结果 |
-|---|---|
-| 等 AI 回复结束 | 空输入框显示一条灰字建议 |
-| Tab | 整条填入草稿，还可以改字 |
-| Enter | 发送草稿 |
-| Esc | 忽略当前会话这一轮的建议 |
-| 自己开始输入 | 灰字隐藏，不覆盖你写的内容 |
+## 安装与升级
 
-默认只开启**回复后的建议**。历史补全、输入停顿时续写、右方向键逐词采纳都关闭；原插件的这些选项仍然保留，需要时可以在插件设置里打开。
+1. 从 [Releases](https://github.com/QingLong-C/DSH-Input-Prediction/releases/latest) 下载最新的 `.tgz` 安装包，无需解压。
+2. 在 DSh 中打开「插件」→「添加插件」，输入安装包的完整路径并安装。
+3. 首次安装后选择「立即启用」；覆盖升级后，请完整退出并重新启动 DSh。
+4. 确认插件列表显示 **DSH-Input Prediction**，完成一轮对话后即可使用。
 
-## 安装
+内部包名保留为 `dsh-suggest-ghost`，用于兼容已有设置。已安装相同包名的版本时，可直接覆盖升级，无需先卸载。已有设置可能被保留；如仅需要回复后预测，请确认历史补全、停顿续写和逐词采纳已关闭。
 
-1. 到 [Releases](https://github.com/QingLong-C/dsh-input-prediction/releases) 下载最新版本的 `.tgz` 文件，不用解压。
-2. 打开 DSh 左侧的「插件」→「添加插件」，填入这个文件的完整路径，点击安装。
-3. 首次安装后点「立即启用」。如果是覆盖升级，安装完成后完整退出 DSh，再重新打开。
-4. 插件列表里应能看到 **DSH-Input Prediction**。正常聊一轮，等回复后的灰字出现即可。
+请使用本仓库 Releases 提供的安装包；npm 同名包不代表本项目的定制版本。
 
-已经装过本项目的中文修复版或原版 `dsh-suggest-ghost`，可以用新的 `.tgz` 直接覆盖，**不用先卸载**。为了保留已有设置，内部安装包名仍是 `dsh-suggest-ghost`，不会再多装一份。升级后检查历史补全、停顿续写和逐词采纳三个开关是否关闭。
+## 使用方式
 
-安装文件请以本仓库的 Releases 为准；npm 上的同名包是上游版本。
+| 操作 | 行为 |
+| --- | --- |
+| AI 回复完成，输入框为空 | 生成并显示一条灰色建议 |
+| **Tab** | 将整条建议填入草稿，仍可编辑 |
+| **Enter** | 发送当前草稿 |
+| **Esc** | 忽略当前会话本轮建议 |
+| 直接输入内容 | 隐藏建议，保留用户输入 |
 
-## 和原插件有什么区别
+## 模型与数据处理
 
-这个项目从 [dsh-suggest-ghost](https://github.com/dsh-plugin-collection/dsh-suggest-ghost) 修改而来，重点是让中文对话里的追问建议更好用。
+默认使用当前会话的模型服务商和模型，也可在插件设置中单独指定。每轮预测会产生额外的模型请求，费用及额度由所选服务商计算。
 
-- **支持正常追问。** 可以建议解释、比较、下一步、行动请求和简短确认，不再把问句一律删掉。
-- **更准确地跟随对话语言。** 生成建议时只取真正的用户消息，避免规则、技能清单、时间提示挤掉中文问题。也可以在插件设置中固定为简体中文。
-- **不抢你的输入。** 输入非空时隐藏整句建议，新回合开始清掉旧建议，Esc 可以忽略当前回合。
-- **设置改完能生效。** 修复了读取旧设置、写入版本冲突、会话晚就绪和输入框重建后的挂载问题。
+插件会将近期对话内容发送至所选模型服务以生成建议。建议仅供参考，可能与实际意图不符；请求失败、超时或未生成有效结果时，不显示建议。显示延迟取决于模型响应和网络状况。
 
-没有合适的下一句时，可以不显示建议。这个项目独立维护，通过下面的自动同步流程跟进上游更新。
+本项目优先保证上下文完整性。当前发布版本在回复结束后生成预测，未启用正文生成期间的实验性预预测机制。
 
-## 自动同步上游
+## 版本更新
 
-GitHub Actions 每 12 小时检查一次上游 `main`，计划时间为北京时间 **09:17、21:17**。GitHub 排队时可能稍晚执行；也可以打开 [Actions](https://github.com/QingLong-C/DSH-Input-Prediction/actions/workflows/sync-upstream.yml)，点 **Run workflow** 立即检查。
+GitHub Actions 每 **12 小时**检查上游更新，计划执行时间为北京时间 **09:17、21:17**；实际执行可能受 GitHub 队列影响。
 
-发现新提交后，会按上次同步的基点合并改动，保留本项目的名称、中文追问和默认开关。构建、中文回归、上游冒烟及同步测试全部通过后，才更新本项目 `main` 并发布新的 `.tgz` 和 SHA256 校验文件。没有上游更新时，不重复发版。
+检测到新提交后，工作流尝试合并，并保留本项目的品牌信息、中文追问支持及默认设置。构建和回归检查全部通过后，才更新主分支并发布 `.tgz` 安装包及 SHA256 校验文件。发生合并冲突或检查失败时，停止本轮发布；没有更新时，不重复发布。
 
-遇到代码冲突、依赖冲突或测试失败，本轮会停止，当前可用版本不会被覆盖。具体原因在 Actions 日志里；解决后重新运行即可。上游的工作流、旧说明文档和预编译文件不会直接覆盖本项目；预编译文件由合并后的源码重新构建。
+自动发布仅更新 GitHub，不会自动安装到本机。可在 [Actions](https://github.com/QingLong-C/DSH-Input-Prediction/actions/workflows/sync-upstream.yml) 中手动运行检查；`rebuild` 选项用于在没有上游更新时重新递增版本并发布，常规检查无需开启。公开仓库连续 60 天没有活动时，GitHub 可能停用定时工作流，届时需手动重新启用。
 
-自动发版只更新 GitHub，**不会自动安装到你的电脑**。云端测试也不能替代 DSh 桌面和真实模型实测；新版本请下载后覆盖安装。手动运行时的 `rebuild` 选项会在上游未变时也递增版本并重新发布，平时保持关闭。
+## 兼容性与验证
 
-公开仓库连续 60 天没有活动时，GitHub 可能停用定时任务；届时到 Actions 重新启用。要暂停同步，也可以在该工作流菜单里选择 Disable workflow。
+已在 **DSh 桌面客户端 `0.2.0-rc.2`** 上验证安装、中文对话预测、灰字显示、Tab 采纳、Enter 发送、Esc 忽略及输入时隐藏。其他客户端版本尚未完成实测。
 
-## 模型、速度和费用
-
-插件会额外调用模型，根据最近的对话生成建议。默认沿用当前会话的服务商和模型，也可以在插件设置里单独指定。费用和额度按对应服务计算。
-
-建议可能比正文晚一点出现，速度取决于模型和网络；请求失败、超时或没有合适结果时，不一定每轮都有灰字。最近的对话内容会发送到你选定的模型服务。
-
-## 已经测过什么
-
-已在 **DSh `0.2.0-rc.2` 桌面客户端**完成安装和真实中文对话测试：灰字显示、Tab 采纳、Enter 发送、Esc 忽略、自己输入时隐藏。其他 DSh 版本尚未在本项目中实测。
-
-自动验证包括 34 项定制回归和 7 组上游冒烟测试。它通过插件接口运行，不需要修改 DSh 安装包。
+自动检查覆盖构建、34 项定制回归、7 组基础冒烟测试及同步流程测试。自动检查不替代客户端交互及真实模型验证。
 
 ## 本地开发
 
-需要 Node.js `22.19+` 的 22 系列版本，或 `24+`，以及 pnpm。
+环境要求：Node.js `^22.19 || >=24`，pnpm。
 
 ```bash
-git clone https://github.com/QingLong-C/dsh-input-prediction.git
-cd dsh-input-prediction
-pnpm install
+git clone https://github.com/QingLong-C/DSH-Input-Prediction.git
+cd DSH-Input-Prediction
+pnpm install --frozen-lockfile
 pnpm build
 pnpm test:cn
 pnpm test:smoke
 node --experimental-strip-types scripts/context-summary-smoke.mjs
+pnpm test:sync
 ```
 
-仓库带有构建后的 `lib/`。改过源码后需要重新构建，再在 DSh「添加插件」里填写项目目录的完整路径。
+修改源码后需重新构建 `lib/`，再通过 DSh 插件管理器安装项目目录或打包后的 `.tgz`。
 
-## 来源和许可
+## 许可证
 
-- 原项目：[dsh-plugin-collection/dsh-suggest-ghost](https://github.com/dsh-plugin-collection/dsh-suggest-ghost)，原作者 WuJiaoJue / wujue。
-- 本项目从[提交 `5489126`](https://github.com/dsh-plugin-collection/dsh-suggest-ghost/commit/5489126f536665b1d3723b3d9343cc08c5612efc)开始修改；更早的提交历史请查看上游仓库。
-- 原插件部分生成与过滤逻辑参考了 [studyzy/dsh-suggest-prompt](https://github.com/studyzy/dsh-suggest-prompt)。
+采用 [MIT 许可证](LICENSE)，保留原作者版权声明。
 
-沿用 [MIT 许可](LICENSE)，保留原作者版权声明。问题和建议请发到[本项目 Issues](https://github.com/QingLong-C/dsh-input-prediction/issues)。
+本项目基于 WuJiaoJue / wujue 的 [dsh-plugin-collection/dsh-suggest-ghost](https://github.com/dsh-plugin-collection/dsh-suggest-ghost) 开发并独立维护。
