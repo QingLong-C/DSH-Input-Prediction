@@ -59,8 +59,8 @@ def main():
     if existing_tag and existing_tag != manifest['commit']:
         raise RuntimeError('Release tag points to another commit')
     pushes = []
-    if manifest['changed']:
-        pushes.append(manifest['commit'] + ':refs/heads/main')
+    if manifest['changed'] or manifest['commit'] != manifest['base']:
+        raise RuntimeError('Only already-merged main commits may be released')
     if not existing_tag:
         pushes.append(manifest['commit'] + ':refs/tags/' + tag)
     if pushes:

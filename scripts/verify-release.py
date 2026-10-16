@@ -34,7 +34,7 @@ manifest = {'version': version, 'base': os.environ['BASE_SHA'],
             'changed': os.environ['CHANGED'] == 'true', 'sha256': digest, 'files': len(names)}
 (folder / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 (folder / 'dsh-input-prediction-checksums.txt').write_text(f'{digest}  {archive.name}\n')
-notes = f'''自动同步上游并发布的版本。
+notes = f'''合并到 main 后，经构建和回归验证发布的版本。
 
 - 上游提交：https://github.com/dsh-plugin-collection/dsh-suggest-ghost/commit/{metadata['upstream_commit']}
 - 保留中文追问、DSH-Input Prediction 名称和默认仅回复后灰字建议。

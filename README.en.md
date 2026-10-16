@@ -60,9 +60,11 @@ Recent conversation content is sent to that service. Suggestions may not match t
 
 GitHub Actions checks for upstream changes every **12 hours**, scheduled for **09:17 and 21:17 Asia/Shanghai**. Runs may be delayed by GitHub's queue.
 
-The workflow preserves project branding, Chinese follow-up support, and default settings. It updates the main branch and publishes a `.tgz` archive with a SHA256 checksum only after the merge, build, and regression checks succeed. Conflicts or failed checks stop publication; unchanged upstream code does not trigger a new release.
+Updates are built and regression-tested on an isolated branch, then submitted as a PR, including a failed check if regression fails. Merge conflicts stop preparation. An existing upstream PR is preserved rather than overwritten or duplicated.
 
-Releases do not install themselves on your computer. Run a manual check from [Actions](https://github.com/QingLong-C/DSH-Input-Prediction/actions/workflows/sync-upstream.yml). The optional `rebuild` input increments the version and publishes even without upstream changes; leave it off for routine checks. GitHub may disable scheduled workflows after 60 days of public-repository inactivity.
+**Accuracy comes first; no automatic merge.** The `Prediction regression` check and human approval are required; new commits dismiss stale approvals. Prediction, context, or model changes require reviewer-run DeepSeek V4.1 Flash comparisons on the same cases, including useful-suggestion coverage. Passing automated tests does not guarantee unchanged prediction accuracy.
+
+After merge to `main`, rebuild, retest, and verify before publishing a new archive. No changes means no PR or duplicate release. Publishing does not install the plugin on your computer. Manual runs from Actions only check for updates; they cannot bypass review. GitHub may disable schedules after 60 days of public-repository inactivity.
 
 
 Live-model regression uses **DeepSeek V4.1 Flash** (`deepseek-v4.1-flash`), without GPT. To pin prediction to this model, enter your configured DeepSeek provider ID and this model ID in plugin settings. Generation and intent verification use the same model. Provider IDs are installation-specific and are not embedded in the bundle.
