@@ -743,12 +743,33 @@ function applyBody(ctx: Context): void {
   const loadFromCache = (): CachedData => {
     try {
       const raw = localStorage.getItem(CACHE_KEY);
-      if (raw === null) return {};
-      return JSON.parse(raw) as CachedData;
-    } catch { return {}; }
+      if (raw === null) {
+        console.log('[suggest-ghost] localStorage cache: EMPTY (first run)');
+        return {};
+      }
+      const data = JSON.parse(raw) as CachedData;
+      console.log('[suggest-ghost] localStorage cache: LOADED', {
+        hot: data.hot?.length ?? 0,
+        history: data.history?.length ?? 0,
+        hasSuggestion: !!data.suggestion,
+      });
+      return data;
+    } catch (e) {
+      console.log('[suggest-ghost] localStorage cache: PARSE ERROR', e);
+      return {};
+    }
   };
   const saveToCache = (data: CachedData): void => {
-    try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch { /* quota exceeded */ }
+    try {
+      localStorage.setItem(CACHE_KEY, JSON.stringify(data));
+      console.log('[suggest-ghost] localStorage cache: SAVED', {
+        hot: data.hot?.length ?? 0,
+        history: data.history?.length ?? 0,
+        hasSuggestion: !!data.suggestion,
+      });
+    } catch (e) {
+      console.log('[suggest-ghost] localStorage cache: SAVE ERROR', e);
+    }
   };
   // 启动时立即从缓存恢复，让插件在 host RPC 完成前就有数据可用。
   const cached = loadFromCache();
@@ -1083,16 +1104,24 @@ function applyBody(ctx: Context): void {
   };
   const scheduleInlineTrigger = (): void => {
     clearInlineTimer();
-    if (!settings.inlineEnabled || bound === null) return;
+    if (!settings.inlineEnabled || bound === null) {
+      console.log(`[suggest-ghost] inline skip: enabled=${settings.inlineEnabled}, bound=${bound !== null}`);
+      return;
+    }
     const draft = bound.input.state.getSnapshot().draft;
     if (draft.trim().length < settings.inlineMinChars) return;
     const currentId = currentSessionIdOf(sessions.list.getSnapshot());
-    if (currentId === undefined) return;
+    if (currentId === undefined) {
+      console.log('[suggest-ghost] inline skip: no current session id');
+      return;
+    }
+    console.log(`[suggest-ghost] inline armed: delay=${settings.inlineDelayMs}, draft=${JSON.stringify(draft.slice(0, 26))}, session=${currentId}`);
     inlineTriggerTimer = setTimeout(() => {
       inlineTriggerTimer = null;
       // 再次校验：定时器到期时草稿可能已变（被 render 重置了 timer 但 draft 也变了）。
       const draftNow = bound?.input.state.getSnapshot().draft ?? '';
       if (draftNow.trim().length < settings.inlineMinChars) return;
+      console.log('[suggest-ghost] inline trigger FIRED: sending complete op');
       writeOps(JSON.stringify({ rev: 0, ops: [{ op: 'complete', sessionId: currentId, draft: draftNow }] }));
     }, settings.inlineDelayMs);
   };
