@@ -792,6 +792,7 @@ function applyBody(ctx: Context): void {
     running: boolean;
     currentId: string | undefined;
     result: GhostContent | null;
+    key: string | null;
   } | null = null;
 
   /** 解析当前会话绑定（会话切换时重建）。 */
@@ -824,9 +825,9 @@ function applyBody(ctx: Context): void {
   };
 
   /** 计算当前应显示的幽灵内容（null = 不显示）。结果按 (draft, settingsEpoch, composing, running, currentId) 缓存。 */
-  const ghostContent = (): GhostContent | null => {
-    if (bound === null) return null;
-    if (composing) return null; // IME 组词中：组合预览与幽灵后缀重叠，抑制显示
+  const ghostContent = (): { content: GhostContent | null; key: string | null } => {
+    if (bound === null) return { content: null, key: null };
+    if (composing) return { content: null, key: null }; // IME 组词中：组合预览与幽灵后缀重叠，抑制显示
     // 0.1.2 会话快照只余 lifecycle 字段；本插件用到的仅剩 `running`。
     const snapshot = bound.session.getSnapshot() as { running: boolean };
     const draft = bound.input.state.getSnapshot().draft;
@@ -839,14 +840,22 @@ function applyBody(ctx: Context): void {
       && ghostContentCache.composing === composing
       && ghostContentCache.running === snapshot.running
       && ghostContentCache.currentId === currentId) {
-      return ghostContentCache.result;
+      return { content: ghostContentCache.result, key: ghostContentCache.key };
     }
 
     const result = computeGhostContent(draft, snapshot, currentId);
 
+    // 计算 content key 并与结果一起缓存，避免 render() 重复拼接字符串。
+    let key: string | null = null;
+    if (result !== null) {
+      key = result.kind === 'llm'
+        ? `llm:${result.text}`
+        : `hist:${result.prefix}|${result.suffix}`;
+    }
+
     // 写入缓存（composing 已在函数入口早退，此处必为 false）。
-    ghostContentCache = { draft, settingsEpoch, composing: false, running: snapshot.running, currentId, result };
-    return result;
+    ghostContentCache = { draft, settingsEpoch, composing: false, running: snapshot.running, currentId, result, key };
+    return { content: result, key };
   };
 
   /** ghostContent 的实际计算（无缓存层）。 */
@@ -913,7 +922,7 @@ function applyBody(ctx: Context): void {
   const render = (): void => {
     resolve();
     retryPendingPull();
-    const content = ghostContent();
+    const { content, key } = ghostContent();
     if (content === null) {
       if (shown !== null) {
         overlay.hide();
@@ -921,10 +930,8 @@ function applyBody(ctx: Context): void {
       }
       return;
     }
-    // 内容指纹：LLM 用文本，历史用 prefix+suffix。
-    const key = content.kind === 'llm'
-      ? `llm:${content.text}`
-      : `hist:${content.prefix}|${content.suffix}`;
+    // key 与 content 同步计算：content 非 null 时 key 必非 null。
+    if (key === null) return;
     if (shown !== null && shown.key === key) return; // 无变化
     // 复用已绑定的输入框；仅当缓存失效（React 重建/首次）时才查询 DOM。
     // 双代选择器：textarea（≤0.1.1）或 contenteditable（0.1.2 Lexical）。
