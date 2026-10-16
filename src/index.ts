@@ -275,8 +275,9 @@ export function apply(ctx: Context, config: GenerateConfig): void {
           : Array.isArray((listed as { namespaces?: unknown[] })?.namespaces)
             ? (listed as { namespaces: unknown[] }).namespaces
             : [];
-        for (const row of rows as Array<{ ns?: string; value?: Record<string, unknown> }>) {
+        for (const row of rows as Array<{ ns?: string; revision?: number; value?: Record<string, unknown> }>) {
           if (row?.ns !== SUGGEST_GHOST_NAMESPACE) continue;
+          console.log(`[dsh-suggest-ghost] describe: revision=${row.revision}, _ops=${JSON.stringify(row.value?._ops).slice(0, 150)}`);
           const v = row.value?._ops;
           if (typeof v === 'string') return v;
         }
@@ -323,8 +324,8 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       // 服务的 ownerContext 上，插件自己的 ctx 收不到——必须监听 root。
       const eventCtx = (ctx as unknown as { root?: typeof ctx }).root ?? ctx;
       console.log('[dsh-suggest-ghost] registering settings/document-updated on eventCtx');
-      eventCtx.on('settings/document-updated', (ns: string) => {
-        console.log(`[dsh-suggest-ghost] settings/document-updated received, ns = ${ns}, expected = ${SUGGEST_GHOST_NAMESPACE}`);
+      eventCtx.on('settings/document-updated', (ns: string, revision?: number) => {
+        console.log(`[dsh-suggest-ghost] settings/document-updated received, ns = ${ns}, rev = ${revision}, expected = ${SUGGEST_GHOST_NAMESPACE}`);
         if (ns !== SUGGEST_GHOST_NAMESPACE) return;
         liveSettings = flattenConfig(resolved);
         const payload = readOps();
@@ -708,9 +709,10 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     if (changed > 0) ctx.logger.info(`dsh-suggest-ghost: hotness ops applied (${changed} changed)`);
     void persistence.flush();
     // 消费完成：清空操作队列（下一次 watch 触发时 ops 为空，直接跳过）。
-    void svc.update(SUGGEST_GHOST_NAMESPACE, { _ops: EMPTY_PUSH }).catch((error: unknown) => {
-      ctx.logger.warn(`dsh-suggest-ghost: clearing _ops failed: ${String(error)}`);
-    });
+    void svc.update(SUGGEST_GHOST_NAMESPACE, { _ops: EMPTY_PUSH }).then(
+      () => console.log('[dsh-suggest-ghost] _ops cleared OK'),
+      (error: unknown) => console.log(`[dsh-suggest-ghost] _ops clear FAILED: ${String(error).slice(0, 300)}`),
+    );
   };
 
   const handleTurnEnd = (session: Session, turn: number): void => {
