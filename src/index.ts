@@ -256,8 +256,32 @@ export function apply(ctx: Context, config: GenerateConfig): void {
    * host 重启后为空，client 下次 pull 会重新捎带；语言检测时作为先验加成。
    */
   let clientUiLocale: string | undefined;
-  /** 取当前 `_ops` 的载荷字符串（读 volatile 引用；裸值形态则直接用）。 */
+  /**
+   * 取当前 `_ops` 的载荷字符串。
+   *
+   * **必须走 settings 服务的 `describe()`**：内核每次配置写入会重新解析 config
+   * 并替换 fiber 持有的对象，apply 参数里捕获的 volatile 引用会冻结在失效时刻的
+   * 值（实测：client 写入 complete op 后，插件内的旧引用永远停在首次 pull 的
+   * 载荷）。`describe()` 同步读取 `entry.fiber.config` 的展开值，是唯一权威源。
+   * settings 服务尚未注入（启动早期）时回退到 volatile 引用读取。
+   */
   const readOps = (): string => {
+    const svc = settingsSvc as { describe?: () => unknown } | null;
+    if (svc !== null && typeof svc.describe === 'function') {
+      try {
+        const listed = svc.describe();
+        const rows = Array.isArray(listed)
+          ? listed
+          : Array.isArray((listed as { namespaces?: unknown[] })?.namespaces)
+            ? (listed as { namespaces: unknown[] }).namespaces
+            : [];
+        for (const row of rows as Array<{ ns?: string; value?: Record<string, unknown> }>) {
+          if (row?.ns !== SUGGEST_GHOST_NAMESPACE) continue;
+          const v = row.value?._ops;
+          if (typeof v === 'string') return v;
+        }
+      } catch { /* describe 异常回退引用读取 */ }
+    }
     const ref = (resolved as { _ops?: unknown })._ops;
     const payload = typeof ref === 'object' && ref !== null && typeof (ref as { get?: unknown }).get === 'function'
       ? (ref as { get: () => unknown }).get()

@@ -236,7 +236,9 @@ function parseAcceptKey(spec: string): ((event: KeyboardEvent) => boolean) | und
 /** 当前应显示的幽灵内容：LLM 建议（完整文本）或历史补全（已输入前缀 + 剩余后缀）。 */
 type GhostContent =
   | { kind: 'llm'; text: string; acceptKey: string }
-  | { kind: 'history'; prefix: string; suffix: string; full: string };
+  | { kind: 'history'; prefix: string; suffix: string; full: string }
+  /** 停顿续写：LLM 生成的草稿延续（prefix=当时草稿，suffix=续写文本，full=prefix+suffix）。 */
+  | { kind: 'inline'; prefix: string; suffix: string; full: string };
 
 /**
  * 幽灵文本 overlay 管理器：在输入框（textarea / Lexical contenteditable）上
@@ -452,7 +454,7 @@ class GhostOverlay {
     const taRect = ta.getBoundingClientRect();
     const originViewportX = taRect.left + borderLeft + padLeft;
     const originViewportY = taRect.top + borderTop + padTop;
-    const end = this.current !== null && this.current.kind === 'history'
+    const end = this.current !== null && this.current.kind !== 'llm'
       ? this.draftEndRect()
       : null;
     if (end !== null) {
@@ -574,7 +576,7 @@ class GhostOverlay {
     const lineHeight = parseFloat(style.lineHeight);
     const tolerance = Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 24;
 
-    if (this.current !== null && this.current.kind === 'history') {
+    if (this.current !== null && this.current.kind !== 'llm') {
       const end = this.draftEndRect();
       if (end === null) return this.rejectAs('no-caret');
       if (end.right < taRect.left || end.right > taRect.right + 1
@@ -728,6 +730,28 @@ function applyBody(ctx: Context): void {
   if (sessions === undefined) return;
   const overlay = new GhostOverlay();
   let lastSessionId: string | undefined;
+
+  // ── localStorage 持久化：冷启动立即恢复历史/热度/建议，避免等待 host RPC ──
+  const CACHE_KEY = 'dsh-suggest-ghost:cache';
+  type CachedData = {
+    hot?: readonly { text: string; count: number }[] | null;
+    history?: readonly string[];
+    historySessionId?: string | null;
+    suggestion?: typeof settings.suggestion;
+    suggestionSessionId?: string | null;
+  };
+  const loadFromCache = (): CachedData => {
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (raw === null) return {};
+      return JSON.parse(raw) as CachedData;
+    } catch { return {}; }
+  };
+  const saveToCache = (data: CachedData): void => {
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify(data)); } catch { /* quota exceeded */ }
+  };
+  // 启动时立即从缓存恢复，让插件在 host RPC 完成前就有数据可用。
+  const cached = loadFromCache();
   let bound: {
     session: ObservableSnapshot<unknown>;
     input: { state: ObservableSnapshot<{ draft: string }>; setDraft: (text: string) => void };
@@ -744,6 +768,12 @@ function applyBody(ctx: Context): void {
     historyCrossSession: boolean;
     historyMaxEntries: number;
     historyMinChars: number;
+    /** 停顿续写开关。 */
+    inlineEnabled: boolean;
+    /** 停顿多久后触发续写（毫秒）。 */
+    inlineDelayMs: number;
+    /** 草稿至少输入多少字符才触发续写。 */
+    inlineMinChars: number;
     /** 幽灵显示时允许 → 逐词采纳（Tab 始终整条采纳）。 */
     wordAccept: boolean;
     /** host 实时推送：最新 LLM 建议（rev 递增识别新值）。 */
@@ -754,6 +784,10 @@ function applyBody(ctx: Context): void {
       truncated: boolean;
       acceptKey: string;
     } | null;
+    /** host 实时推送：停顿续写结果（draft=生成时的草稿，文本不符则不显示）。 */
+    completion: { draft: string; text: string } | null;
+    /** completion 所属会话；与当前会话不符时不显示。 */
+    completionSessionId: string | null;
     /** host 实时推送：跨会话热度快照。 */
     hot: readonly { text: string; count: number }[] | null;
     /** host 实时推送：当前会话的最近用户输入文本（时间序，历史补全文本源）。 */
@@ -767,12 +801,17 @@ function applyBody(ctx: Context): void {
     historyCrossSession: false,
     historyMaxEntries: 50,
     historyMinChars: 1,
+    inlineEnabled: true,
+    inlineDelayMs: 800,
+    inlineMinChars: 4,
     wordAccept: true,
-    suggestion: null,
-    hot: null,
-    history: [],
-    historySessionId: null,
-    suggestionSessionId: null,
+    suggestion: cached.suggestion ?? null,
+    completion: null,
+    completionSessionId: null,
+    hot: cached.hot ?? null,
+    history: cached.history ?? [],
+    historySessionId: cached.historySessionId ?? null,
+    suggestionSessionId: cached.suggestionSessionId ?? null,
   };
 
   /**
@@ -826,8 +865,9 @@ function applyBody(ctx: Context): void {
 
   /** 计算当前应显示的幽灵内容（null = 不显示）。结果按 (draft, settingsEpoch, composing, running, currentId) 缓存。 */
   const ghostContent = (currentId: string | undefined): { content: GhostContent | null; key: string | null } => {
-    // 双模式禁用：直接返回，跳过快照读取
-    if (!settings.historyEnabled && settings.suggestion === null) return { content: null, key: null };
+    // 双模式禁用：直接返回，跳过快照读取（续写开启且有载荷时不能早退）
+    if (!settings.historyEnabled && settings.suggestion === null
+      && (!settings.inlineEnabled || settings.completion === null)) return { content: null, key: null };
     if (bound === null) return { content: null, key: null };
     if (composing) return { content: null, key: null }; // IME 组词中：组合预览与幽灵后缀重叠，抑制显示
     // 0.1.2 会话快照只余 lifecycle 字段；本插件用到的仅剩 `running`。
@@ -851,7 +891,7 @@ function applyBody(ctx: Context): void {
     if (result !== null) {
       key = result.kind === 'llm'
         ? `llm:${result.text}`
-        : `hist:${result.prefix}|${result.suffix}`;
+        : `${result.kind}:${result.prefix}|${result.suffix}`;
     }
 
     // 写入缓存（composing 已在函数入口早退，此处必为 false）。
@@ -865,6 +905,16 @@ function applyBody(ctx: Context): void {
     snapshot: { running: boolean },
     currentId: string | undefined,
   ): GhostContent | null => {
+    // 模式 1：草稿非空 → 停顿续写优先（host 推送的 LLM 续写，须与当时草稿
+    // 逐字相符且属于当前会话），其次历史前缀补全（即时、无网络）。
+    if (draft.trim() !== '' && settings.inlineEnabled) {
+      const completion = settings.completion;
+      if (completion !== null && completion !== undefined
+        && settings.completionSessionId !== null && settings.completionSessionId === currentId
+        && completion.draft === draft && completion.text !== '') {
+        return { kind: 'inline', prefix: draft, suffix: completion.text, full: draft + completion.text };
+      }
+    }
     // 模式 1：草稿非空 → 历史前缀补全（打分制：新近度为主、频次/热度为辅）。
     if (settings.historyEnabled && draft.trim() !== '') {
       // 草稿是斜杠命令整行时（如 `/later +3m 我重新部署了…`），用命令名之后
@@ -925,6 +975,9 @@ function applyBody(ctx: Context): void {
   const render = (): void => {
     const currentId = currentSessionIdOf(sessions.list.getSnapshot());
     resolve(currentId);
+    // 停顿续写调度：草稿每次变化都重置定时器（debounce），停满
+    // inlineDelayMs 才真正发送 complete op。
+    scheduleInlineTrigger();
     retryPendingPull();
     const { content, key } = ghostContent(currentId);
     if (content === null) {
@@ -1010,9 +1063,36 @@ function applyBody(ctx: Context): void {
       // payload 非 JSON，原样发送
     }
     return svc
-      .mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['_ops'], value: enriched }])
+      .mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['_ops'], value: enriched }], 0)
       .then(() => true)
       .catch(() => false);
+  };
+  /**
+   * 停顿续写调度：草稿非空且达到阈值时，停止输入 inlineDelayMs 后向 host 发送
+   * `complete` op（携带当时草稿），host 生成续写并经 `_push` 推回 completion。
+   * 每次按键重置定时器（debounce）；到期时再校验草稿仍达阈值才发送。
+   */
+  let inlineTriggerTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearInlineTimer = (): void => {
+    if (inlineTriggerTimer !== null) {
+      clearTimeout(inlineTriggerTimer);
+      inlineTriggerTimer = null;
+    }
+  };
+  const scheduleInlineTrigger = (): void => {
+    clearInlineTimer();
+    if (!settings.inlineEnabled || bound === null) return;
+    const draft = bound.input.state.getSnapshot().draft;
+    if (draft.trim().length < settings.inlineMinChars) return;
+    const currentId = currentSessionIdOf(sessions.list.getSnapshot());
+    if (currentId === undefined) return;
+    inlineTriggerTimer = setTimeout(() => {
+      inlineTriggerTimer = null;
+      // 再次校验：定时器到期时草稿可能已变（被 render 重置了 timer 但 draft 也变了）。
+      const draftNow = bound?.input.state.getSnapshot().draft ?? '';
+      if (draftNow.trim().length < settings.inlineMinChars) return;
+      writeOps(JSON.stringify({ rev: 0, ops: [{ op: 'complete', sessionId: currentId, draft: draftNow }] }));
+    }, settings.inlineDelayMs);
   };
   let pullRev = 0;
   let lastPulledSessionId: string | undefined;
@@ -1122,6 +1202,8 @@ function applyBody(ctx: Context): void {
             history?: unknown;
             historySessionId?: unknown;
             suggestionSessionId?: unknown;
+            completion?: unknown;
+            completionSessionId?: unknown;
           } | null = null;
           if (typeof v._push === 'string' && v._push !== '') {
             try {
@@ -1135,6 +1217,9 @@ function applyBody(ctx: Context): void {
             historyCrossSession: typeof v.historyCrossSession === 'boolean' ? v.historyCrossSession : false,
             historyMaxEntries: typeof v.historyMaxEntries === 'number' ? v.historyMaxEntries : 50,
             historyMinChars: typeof v.historyMinChars === 'number' ? v.historyMinChars : 1,
+            inlineEnabled: typeof v.inlineEnabled === 'boolean' ? v.inlineEnabled : true,
+            inlineDelayMs: typeof v.inlineDelayMs === 'number' ? v.inlineDelayMs : 800,
+            inlineMinChars: typeof v.inlineMinChars === 'number' ? v.inlineMinChars : 4,
             wordAccept: typeof v.wordAccept === 'boolean' ? v.wordAccept : true,
             suggestion: pushed?.suggestion === null || pushed?.suggestion === undefined
               ? null
@@ -1152,7 +1237,23 @@ function applyBody(ctx: Context): void {
               ? (typeof pushed?.historySessionId === 'string' ? pushed.historySessionId : null)
               : settings.historySessionId,
             suggestionSessionId: typeof pushed?.suggestionSessionId === 'string' ? pushed.suggestionSessionId : null,
+            // 续写：载荷省略 = host 未更新（保留现值，显示时仍以 draft 全等校验兜底）；
+            // 显式 null = host 作废（切会话/回合结束清理）。
+            completion: pushed?.completion === undefined
+              ? settings.completion
+              : (pushed.completion as typeof settings.completion),
+            completionSessionId: pushed?.completion === undefined
+              ? settings.completionSessionId
+              : (typeof pushed.completionSessionId === 'string' ? pushed.completionSessionId : null),
           };
+          // 收到 host 新鲜数据后立即持久化，下次冷启动可立即恢复。
+          saveToCache({
+            hot: settings.hot,
+            history: settings.history,
+            historySessionId: settings.historySessionId,
+            suggestion: settings.suggestion,
+            suggestionSessionId: settings.suggestionSessionId,
+          });
           render();
         } catch {
           // describe 失败（网络抖动/后端未就绪）时保留现值，等下一个事件或重连。
@@ -1196,6 +1297,10 @@ function applyBody(ctx: Context): void {
         let accepted: string;
         if (content.kind === 'llm') {
           accepted = content.text;
+        } else if (content.kind === 'inline') {
+          // 停顿续写：prefix 即显示时刻的草稿原样，采纳直接拼 full（draft+text）。
+          // 命令整行草稿（/later …）的续写 full 本就含命令前缀，无需回填。
+          accepted = content.full;
         } else {
           const draftNow = bound.input.state.getSnapshot().draft;
           const contentDraft = stripCommandPrefix(draftNow);
@@ -1313,6 +1418,7 @@ function applyBody(ctx: Context): void {
       if (pullRetryTimer !== null) clearTimeout(pullRetryTimer);
       pullRetryTimer = null;
       pendingPull = null;
+      clearInlineTimer();
       window.removeEventListener('keydown', onKeyDown, true);
       window.removeEventListener('compositionstart', onCompositionStart, true);
       window.removeEventListener('compositionend', onCompositionEnd, true);
