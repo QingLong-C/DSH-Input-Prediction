@@ -26,7 +26,9 @@ const result = await build({
   // 全局 React.createElement，宿主无全局 React 导致设置卡片渲染崩溃）。
   jsx: 'automatic',
   // react 由 __ModuleLoader__ 的 require 从宿主解析（前端运行时已提供）。
-  external: ['react', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
+  // 其他依赖由 @deepseek-ai/dsh-client-ui-primitives 等库引入，同样从宿主解析。
+  // 使用 packages: 'external' 让所有 node_modules 中的包都从外部解析。
+  packages: 'external',
 });
 
 const body = result.outputFiles[0].text;

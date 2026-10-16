@@ -59,6 +59,10 @@ export type HotnessOp = {
 } | {
     readonly op: 'pull';
     readonly sessionId: string;
+} | {
+    readonly op: 'complete';
+    readonly sessionId: string;
+    readonly draft: string;
 };
 /**
  * `suggest-ghost/hot-index` 事件的载荷——跨会话历史热度快照。

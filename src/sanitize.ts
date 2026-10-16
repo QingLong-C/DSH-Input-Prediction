@@ -108,3 +108,23 @@ export function shouldFilterSuggestion(text: string): boolean {
   }
   return false;
 }
+
+/** 续写场景的过滤（与 shouldFilterSuggestion 相同逻辑）。 */
+export const shouldFilterCompletion = shouldFilterSuggestion;
+
+/** 剥离续写输出中对草稿的回显（避免重复用户已输入的内容）。 */
+export function stripDraftEcho(completion: string, draft: string): string {
+  if (completion.length === 0 || draft.length === 0) return completion;
+  // 如果续写以草稿开头，剥离它
+  const lowerCompletion = completion.toLowerCase();
+  const lowerDraft = draft.toLowerCase();
+  if (lowerCompletion.startsWith(lowerDraft)) {
+    return completion.slice(draft.length).trim();
+  }
+  // 如果续写包含草稿（部分回显），尝试剥离
+  const idx = lowerCompletion.indexOf(lowerDraft);
+  if (idx >= 0 && idx < completion.length * 0.3) {
+    return (completion.slice(0, idx) + completion.slice(idx + draft.length)).trim();
+  }
+  return completion;
+}

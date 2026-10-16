@@ -295,14 +295,17 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       // `_ops` 反向通道：client 经 `ctx.remote.settings.mutate(ns, ops)` 写入，
       // 内核改 volatile 引用并 emit `settings/document-updated(ns, revision)`。
       // 该事件只带 (ns, revision)，故每次都重读引用比对载荷。
-      ctx.on('settings/document-updated', (ns: string) => {
-        ctx.logger.info(`dsh-suggest-ghost: settings/document-updated, ns = ${ns}, expected = ${SUGGEST_GHOST_NAMESPACE}`);
+      // **关键**：cordis 事件只向父级传播、不向子级传播。该事件 emit 在 settings
+      // 服务的 ownerContext 上，插件自己的 ctx 收不到——必须监听 root。
+      const eventCtx = (ctx as unknown as { root?: typeof ctx }).root ?? ctx;
+      console.log('[dsh-suggest-ghost] registering settings/document-updated on eventCtx');
+      eventCtx.on('settings/document-updated', (ns: string) => {
+        console.log(`[dsh-suggest-ghost] settings/document-updated received, ns = ${ns}, expected = ${SUGGEST_GHOST_NAMESPACE}`);
         if (ns !== SUGGEST_GHOST_NAMESPACE) return;
         liveSettings = flattenConfig(resolved);
         const payload = readOps();
-        ctx.logger.info(`dsh-suggest-ghost: payload = ${JSON.stringify(payload)}, lastOpsPayload = ${JSON.stringify(lastOpsPayload)}`);
+        console.log(`[dsh-suggest-ghost] payload = ${JSON.stringify(payload).slice(0, 300)}`);
         if (payload === lastOpsPayload) {
-          ctx.logger.info(`dsh-suggest-ghost: no change, skip`);
           return;
         }
         lastOpsPayload = payload;
@@ -310,6 +313,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       });
       ctx.logger.info('dsh-suggest-ghost: settings wired (volatile config, ns=suggest-ghost)');
     } catch (error) {
+      console.log(`[dsh-suggest-ghost] settings wiring failed: ${String(error)}`);
       ctx.logger.warn(`dsh-suggest-ghost: settings wiring failed: ${String(error)}`);
     }
   });
@@ -434,22 +438,22 @@ export function apply(ctx: Context, config: GenerateConfig): void {
    * 4. 缓存命中时直接重推（同 sessionId+draft 的缓存结果）
    */
   const handleComplete = (sessionId: string, draft: string): void => {
-    ctx.logger.info(`dsh-suggest-ghost: handleComplete called, sessionId = ${sessionId}, draft = ${JSON.stringify(draft)}`);
+    console.log(`[dsh-suggest-ghost] handleComplete called, sessionId = ${sessionId}, draft = ${JSON.stringify(draft)}`);
     const cfg = effective();
     if (cfg.inlineEnabled === false) {
-      ctx.logger.info(`dsh-suggest-ghost: inlineEnabled is false, skip`);
+      console.log(`[dsh-suggest-ghost] inlineEnabled is false, skip`);
       return;
     }
     if (draft.trim().length < cfg.inlineMinChars) {
-      ctx.logger.info(`dsh-suggest-ghost: draft too short, skip`);
+      console.log(`[dsh-suggest-ghost] draft too short, skip`);
       return;
     }
     const session = ctx.sessions.get(sessionId as SessionId);
     if (session === undefined) {
-      ctx.logger.info(`dsh-suggest-ghost: session not found, skip`);
+      console.log(`[dsh-suggest-ghost] session not found, skip`);
       return;
     }
-    ctx.logger.info(`dsh-suggest-ghost: session found, generating completion...`);
+    console.log(`[dsh-suggest-ghost] session found, generating completion...`);
     // 缓存命中：同 sessionId+draft → 直接重推。
     const cached = completionCache.get(sessionId);
     if (cached !== undefined && cached.draft === draft) {
@@ -480,7 +484,11 @@ export function apply(ctx: Context, config: GenerateConfig): void {
         // 生成完成：检查是否仍为当前（未被新草稿中止）。
         if (completionPending.get(sessionId) !== controller) return;
         completionPending.delete(sessionId);
-        if (result.text === undefined) return; // 空/不合格 → 静默
+        if (result.text === undefined) {
+          console.log(`[dsh-suggest-ghost] completion empty/filtered for session ${sessionId}, silent`);
+          return; // 空/不合格 → 静默
+        }
+        console.log(`[dsh-suggest-ghost] completion generated for session ${sessionId}: ${JSON.stringify(result.text).slice(0, 120)} (${Date.now() - startedAt}ms)`);
         cacheCompletion(sessionId, draft, result.text);
         pushToClient({
           ...statePushOf(sessionId),
@@ -494,6 +502,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
         completionPending.delete(sessionId);
         // 中止 = 被新草稿取代，不算失败；其他错误静默丢弃。
         if (!controller.signal.aborted) {
+          console.log(`[dsh-suggest-ghost] completion FAILED for session ${sessionId}: ${String(error).slice(0, 300)}`);
           ctx.logger.debug?.(`dsh-suggest-ghost: completion failed for session ${sessionId}: ${String(error)}`);
         }
       },
@@ -659,6 +668,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     const ops = parsed.ops;
     if (ops.length === 0) return;
     for (const op of ops) {
+      console.log(`[dsh-suggest-ghost] consumeOps op=${op.op}, sessionId = ${(op as { sessionId?: string }).sessionId ?? '-'}`);
       if (op.op === 'pull') {
         ctx.logger.info(`dsh-suggest-ghost: consumeOps pull, sessionId = ${op.sessionId}`);
         // 无论历史环可不可得都应答：环缺失（会话尚未进店/已销毁）时 statePushOf
