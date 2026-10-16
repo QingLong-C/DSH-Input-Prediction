@@ -327,6 +327,14 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       eventCtx.on('settings/document-updated', (ns: string, revision?: number) => {
         console.log(`[dsh-suggest-ghost] settings/document-updated received, ns = ${ns}, rev = ${revision}, expected = ${SUGGEST_GHOST_NAMESPACE}`);
         if (ns !== SUGGEST_GHOST_NAMESPACE) return;
+        // 三点对照：①内核 raw（configEditor 条目）②插件捕获的 volatile 引用 ③describe 值
+        try {
+          const editor = (ctx as unknown as { configEditor?: { entries(): Array<{ options: { id: string }; config?: Record<string, unknown> }> } }).configEditor;
+          const row = editor?.entries?.().find((r) => r.options.id === SUGGEST_GHOST_NAMESPACE);
+          const rawOps = row?.config?._ops;
+          const refOps = (resolved as { _ops?: { get?: () => unknown } })._ops?.get?.();
+          console.log(`[dsh-suggest-ghost] 3way: raw=${JSON.stringify(rawOps).slice(0, 130)} ref=${JSON.stringify(refOps).slice(0, 130)}`);
+        } catch (e) { console.log(`[dsh-suggest-ghost] 3way probe failed: ${String(e).slice(0, 150)}`); }
         liveSettings = flattenConfig(resolved);
         const payload = readOps();
         console.log(`[dsh-suggest-ghost] payload = ${JSON.stringify(payload).slice(0, 300)}`);
