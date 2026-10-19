@@ -1,18 +1,37 @@
-# 上游反馈草稿：settings 远程代理在写冲突时对调用方显示为成功
+# 上游反馈草稿：settings 远程代理的写冲突语义，与 `document-updated` 的事务内 emit
 
 > **状态：待提交的草稿。** 尚未提交给 DSH 内核或 dsh-settings 维护者，也未收到任何回复。
-> 提交前需要先补文末「发出前要补的证据」里那三项。
 >
-> 收件对象：DSH 内核 / `@deepseek-ai/dsh-settings` 与远程 settings 代理（`dsh-api-settings-controller`）维护者。
-> 涉及版本：`@deepseek-ai/dsh-settings@0.2.0-rc.2`、`@deepseek-ai/dsh-api-settings-controller@0.2.0-rc.2`（本机核对于 2026-10-19）。
-> 报告方：dsh-suggest-ghost 插件（`src/client/index.ts` 的 `writeOps`，修复见该仓库 commit `a864545`）。
+> 收件对象：DSH 内核 / `@deepseek-ai/dsh-settings`、远程 settings 代理
+> （`dsh-api-settings-controller`）、以及 `dsh-hmr` 的事务串行化维护者。
+> 涉及版本：`@deepseek-ai/dsh-settings@0.2.0-rc.2`、
+> `@deepseek-ai/dsh-api-settings-controller@0.2.0-rc.2`、
+> `@deepseek-ai/dsh-api-gateway@0.2.0-rc.2`、`@deepseek-ai/dsh-hmr@0.2.0-rc.2`、
+> `@deepseek-ai/cordis@4.0.1`（本机核对于 2026-10-19）。
+> 报告方：dsh-suggest-ghost 插件（`src/client/index.ts` 的 `writeOps`，修复见 `a864545`
+> 与本轮的 `src/client/settings-result.ts`）。
+>
+> 本文有两个诉求，**第二个比第一个更根本**：
+>  - **诉求一**（冲突为何对客户端表现为成功）：机制本轮**已在源码里定位**，不再是未闭环
+>    问题；现在请维护者确认「折进 `RemoteResult` 后照常兑现」是设计意图，并确认
+>    `code` 的重映射（`SETTINGS_CONFLICT` → `settings/conflict`）是稳定契约。
+>  - **诉求二**（新）：`settings/document-updated` 在 HMR 事务**内** emit，订阅方在自己的
+>    回调里写 settings 必被 `HMR transactions cannot be nested` 拒绝，且该上下文沿
+>    await/timer 传播、无法靠「推迟一个 tick」摆脱。本插件有实测数据：一个进程内
+>    372/373 次 `_ops` 清空都是这个拒绝。
 
 ## 一句话
 
-`SettingsForms.write()` 遇到 revision 不匹配会抛 `SettingsConflictError`；插件经由
-`ctx.remote.settings.mutate()` 提交同类写入时，观测到 Promise 成功兑现而值没有落盘。
-写失败在客户端侧表现为写成功，调用方无从判断。（内核侧确实会抛错，所以信号是在中间某一
-环节丢的，环节尚未定位，这正是我们想请维护者确认的第一件事。）
+1. `SettingsForms.write()` 遇到 revision 不匹配会抛 `SettingsConflictError`；经由
+   `ctx.remote.settings.mutate()` 提交同类写入时，**拒绝被折进 `RemoteResult` 的 error
+   分支后照常兑现**，于是「写失败」在客户端侧表现为「Promise 成功」——而绝大多数调用方
+   只读 Promise 状态。机制已定位（见下「环节在哪一层丢的」），我们要确认的是这是不是
+   设计意图，以及 `code` 重映射是否是稳定契约。
+2. `settings/document-updated` 是在 HMR 事务的 `AsyncLocalStorage` 上下文里 emit 的，
+   因此订阅方在自己的回调里发起的任何 settings 写入都会被
+   `HMR transactions cannot be nested` 拒绝；而这个上下文沿 await/microtask/timer
+   继续传播，调用方**没有办法**靠自己「推迟到下一个 tick」摆脱它。我们要么需要一个
+   显式的退出机制，要么需要该事件改为事务外 emit。
 
 ## 期望的行为（内核源码里确实是这么实现的）
 
@@ -71,6 +90,44 @@ remote.settings.mutate('suggest-ghost', [{ op: 'set', path: ['_ops'], value }], 
   第三个参数留了三个连续的诊断提交（`d015864`、`685045a`、`006c554`），之后才有 `a864545`。
 - 冲突拒绝本身是有价值的设计（避免覆盖他人改动）；问题只在拒绝的信号被丢弃。
 
+## 环节在哪一层丢的（本轮源码取证，0.2.0-rc.2）
+
+```
+@deepseek-ai/dsh-settings/lib/index.js:511
+  if (expected !== void 0 && descriptor.revision !== expected) throw new SettingsConflictError(ns, expected, descriptor.revision);
+      ↑ code = "SETTINGS_CONFLICT"（同文件 :165），message 含 "revision"（:176）
+
+@deepseek-ai/dsh-api-settings-controller/lib/index.js:489,501-507
+  settingsConflictOf(error) → new RemoteError("settings/conflict", conflict.message, {ns, expected, actual})
+      ↑ 码在这里被换成远程 taxonomy；details 保留了 expected/actual
+
+@deepseek-ai/dsh-api-gateway/lib/index.js:1425-1437   rpcFailure(error) → {ok:false, error:{code,message,details}}
+@deepseek-ai/dsh-api-gateway/lib/client.js:2124-2126  rebuiltFailure(e) → new RemoteError(e.code, e.message, e.details)
+@deepseek-ai/dsh-api-gateway/lib/client.js:1795-1802  invoke(): if (!result.ok) return {ok:false, error: rebuiltFailure(...)}
+      ↑ 兑现，不是 reject
+
+@deepseek-ai/dsh-typert-protocol/lib/types/types.d.ts:60-73
+  「The Remote face itself folds carrier failures into the error branch, so no consumer
+   wraps a call to recover one; only assembly faults (arity, an unmounted method, a
+   missing Context adapter) still reject.」
+```
+
+即：内核确实抛了，控制层也确实分类了，**丢信号的最后一步是「兑现一个带 error 的结果」这个
+API 形状本身**。三点补充观察：
+
+- 码是**跨传输层保留**的（`rebuiltFailure` 原样重建 `code`），但值被重映射过。
+  所以上层要判 `settings/conflict`，判 `SETTINGS_CONFLICT` 会漏——这两个名字在不同层，
+  很容易踩。我们建议文档里把「远程 taxonomy 的码表」当作公开契约写出来。
+- 内核自己的设置页已经是按这个形状写的（`await ctx.remote.settings.mutate(...)` 之后
+  读 `response.ok`，再按 `response.error.code === "settings/conflict"` 分支：
+  `@deepseek-ai/dsh-client-ui-settings-models/lib/client.js:2795-2805`）。也就是说
+  「记得读 `ok`」目前是靠每个调用方各自发现，而不是 API 逼出来的。
+- 成功分支带回的 `SettingsNamespaceView`（含 `revision: z.number()` 与整份 `value`，
+  `dsh-api-settings-controller/lib/typert.remote-client.js:69-82`）其实**已经足够**让
+  调用方做写后确认，无需额外 `describe()`。我们按这个把插件的判定做实了。
+  如果能在返回结构里再加一个显式判别式（例如 `applied: boolean`），就能把「没生效」
+  变成不可能被忽略的分支——这也是下面建议 2 的落点。
+
 ## 最小复现路径
 
 以下 1-4 是从源码推导的路径，**尚未在本机以真实宿主跑通**（缺隔离 profile 下的双客户端环境）；
@@ -104,18 +161,92 @@ remote.settings.mutate('suggest-ghost', [{ op: 'set', path: ['_ops'], value }], 
    在本机 0.2.0-rc.2 产物里检索不到。这个 arity 门禁是哪一层、哪个代次加的，需要维护者确认；
    它也可能正是丢错误的那一层。
 
+## 诉求二：`document-updated` 的事务内 emit 让订阅方无法回写
+
+**现象与数据**（本机 `~/.dsh/dsh-web.log`，同一进程内计数）：
+
+| 观测 | 次数 |
+|---|---|
+| `_ops` 清空失败 `HMR transactions cannot be nested` | 372 |
+| `_ops` 清空失败 `atomic-write: timed out waiting for the writer lock` | 1 |
+| `_ops` 清空成功 | 0 |
+| `consumeOps` 消费 `complete` op | 169（消费本身成功） |
+
+**机制链**（0.2.0-rc.2，逐处 file:line）：
+
+```
+dsh-config-editor/lib/index.js:134      await (hmr === void 0 ? run() : hmr.runExclusive(run));
+dsh-hmr/lib/index.js:271                executing = new AsyncLocalStorage();
+dsh-hmr/lib/index.js:280                if (this.executing.getStore()) return Promise.reject(new Error("HMR transactions cannot be nested"));
+dsh-hmr/lib/index.js:284                return this.executing.run(true, operation);
+dsh-settings/lib/index.js:510           await this.ownerContext.configEditor.edit(entry, (raw, inherited) => {
+                                            const descriptor = this.describe()...   ← 事务内
+dsh-settings/lib/index.js:435           ...this.ownerContext.emit("settings/document-updated", entry.options.id, revision);
+```
+
+于是：**插件在 `settings/document-updated` 的回调里（含该回调的任何 await 续体）发起的
+settings 写入，必被拒**。而「消费完清空队列」「应答 pull」「续写完成后推载荷」这些再正常
+不过的反应式写入，全都长在这个回调上。
+
+**调用方自救不了**，我们实测过四条路：
+
+| 做法 | `executing.getStore()` | 结论 |
+|---|---|---|
+| 回调里直接 `settings.update()` | `true` | 拒绝 |
+| `await Promise.resolve()` 之后再写 | `true` | 拒绝 |
+| `queueMicrotask(...)` 里写 | `true` | 拒绝 |
+| 回调里 `setTimeout(..., 5)` 里写 | `true` | 拒绝（ALS 上下文随 timer 一起传播） |
+| 事务**外**建的 `setTimeout` / `new AsyncResource()` 里写 | `undefined` | 可以通过 |
+
+最后一行是唯一的出路，但它要求调用方**持有一个建立于事务之外的锚点**。插件侧没有可靠的
+这样的锚点：`apply(ctx)` 本身就可能跑在配置重载事务里（`dsh-hmr/lib/index.js:289` 的
+`runReload` 也在 `runExclusive` 内），所以在启动期捕获的 `AsyncResource` 有可能一开始就
+带着 `true`。让每个订阅方去赌锚点的时机，不是一个可写进文档的规则。
+
+**我们建议的修法（按侵入性从小到大）**：
+
+1. **提供显式退出**：`dsh-hmr` 已经在自己的 `watchConfig` 里用了
+   `this.executing.exit(...)`（`dsh-hmr/lib/index.js:303`），把这个能力以受控形式暴露给
+   订阅方即可（例如 `hmr.runDetached(fn)` 或 `ctx.settings.writeOutsideTransaction(fn)`），
+   并写明「事件回调内回写 settings 必须走它」。
+2. **把 `document-updated` 改成事务外 emit**（把 `describe()` 里那次 emit 排到当前事务
+   结束后再广播）。代价是订阅者看到的事件可能落后于实际文档状态，但至少回调里的写入是
+   合法动作，而不是注定失败的静默 no-op。注意 `SettingsForms.write()` 在 edit 回调内调
+   `describe()` 只为读一次 `descriptor.revision` 做比较（`dsh-settings/lib/index.js:510`）——
+   如果那次内部 `describe()` 不 emit（或者提供一个不发事件的内部读取面），这条链就断了。
+3. **最低成本**：把 nested 拒绝从 `Promise.reject(new Error(...))` 换成带稳定码的失败
+   （现在只有一句人读文本，上层无法可靠分诊），并在 `dsh-settings` 文档里明确写
+   「settings 事件回调内不可再写 settings」。我们插件现在靠自己 `text.includes('cannot be nested')`
+   来分诊这一类（见 `src/index.ts` 的 `traceFault('ops-clear-nested', ...)`），这是不该
+   由文本匹配承担的分支。
+
+**我们接受的反驳**：如果 (1)(2) 都不打算做，那么请明确「反应式写入必须挂在自己的定时器/
+非 ALS 锚点上」是有支持的用法，并给出推荐锚点。目前我们只能把它记为「结构性失败 + 分诊
+留痕」，并在 `docs/internals-cordis-settings-pitfalls.md` 陷阱 1.5 里按插件经验引用。
+
 ## 我们接受的反驳
 
-如果远程代理确实在冲突时 reject，那么本次观测到的「resolve + 值未落盘」就另有原因
-（例如写入根本没到达 `write()`，或 `revision` 的推导时机与我们理解的不一致）。这正是我们
-想从维护者那里得到的答案：到底是哪一种，以及插件侧应当断言什么。在拿到答复之前，本仓库
-把这一条记为「未闭环」而不是内核缺陷，文档见
+这一条已经不需要反驳了——机制在源码里定位到了（见「环节在哪一层丢的」），远程面**设计上
+就是不 reject**。所以我们想从维护者那里得到的答案换成两个问题：
+
+1. 「失败折进 `RemoteResult` 的 error 分支后照常兑现」是**长期契约**还是当前实现的偶然？
+   若某天改成 reject，只读 `ok` 的调用方会突然开始看到 unhandled rejection（我们两侧都
+   做了兼容：`ok === false` 与 reject 分支走同一套分诊）。
+2. `SETTINGS_CONFLICT` → `settings/conflict` 的重映射会不会随版本变动？如果远程 taxonomy
+   的码表是公开契约，请写进文档，我们好只认一个码而不是两个。
+
+在拿到答复之前，本仓库按「API 形状如此、调用方必须读兑现值」处理：判定与写后确认已做实
+（`src/client/settings-result.ts` + `scripts/ops-write-verify-smoke.mjs`），文档见
 `docs/internals-cordis-settings-pitfalls.md` 陷阱 1。
 
 ## 发出前要补的证据
 
-- [ ] 把上面 1-5 步在真实宿主上跑一遍，录下客户端 Promise 的实际状态与随后
-      `describe()` 的 `_ops` 值（区分「内核没收到」与「内核拒绝但没回传」）。
+- [x] ~~区分「内核没收到」与「内核拒绝但没回传」~~ —— 已在源码层定位（见「环节在哪一层
+      丢的」）：内核抛了、控制层分类了、远程面折进 error 分支兑现。仍需在真实宿主上复跑
+      一遍 1-5 步以确认代次一致性，但结论不再依赖它。
+- [ ] 诉求二需要一次可控复现：在 `settings/document-updated` 回调里写同 ns 的另一个
+      volatile 字段，记录 `HMR transactions cannot be nested` 与四种「推迟」写法的结果
+      （我们的小样本见上面那张表，来自单一进程的运行日志）。
 - [ ] 确认观测所用的内核代次：本仓库同时支持 `0.1.1-rc.2` 到 `0.2.0-rc.2` 五代
       （`package.json` peerDependencies），事故记录未标注代次。
 - [ ] 用 `code === 'SETTINGS_CONFLICT'` 而不是文本匹配做一次判定，确认客户端能否拿到该码
