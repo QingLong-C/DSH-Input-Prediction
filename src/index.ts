@@ -291,6 +291,10 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     merge: mergeLiveConfig,
     // 诊断走 ctx.logger（不新增 console.log 债务）。注意 describe() 失败的 TTL 重试
     // 是每 5s 一次，所以只在「真异常」上打一次 warn，恢复时补一条 info。
+    // ⚠️ 但只有下面那条 `warn` 真的能落到任何地方（且仅当启动失败时进崩溃转储）：
+    // 本宿主唯一的 logger exporter 的回调只收 warn/error，`info` / `debug` 会被丢弃——
+    // 取证见 `traceOps` 上方那段。**所以 #19 的「设置页改了有没有生效」不能靠这几行
+    // 判定**，要看 `[dsh-suggest-ghost][ops-trace]` 那侧的通道留痕，或另加一次性断言。
     onRefresh: (info) => {
       if (info.ok) {
         if (liveSettingsFailed) {
@@ -606,6 +610,56 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     );
   };
 
+  /**
+   * `_ops` / `_push` 通道的**语义留痕**唯一落点。
+   *
+   * ⚠️ **这里必须是 `console.log`。改回 `ctx.logger` 单通道等于把留痕删掉**——三条
+   * 本机 0.2.0-rc.2 产物里核对过的事实（issue #20 只记到了第 1 条的一半）：
+   *  1. 宿主全局**只注册了一个 logger exporter**：
+   *     `@deepseek-ai/dsh-app-boot/lib/index.js:4053-4066`。它 `levels: { default: 2 }`
+   *     （cordis 级别 error0 / info1 / warn2 / debug3，见
+   *     `@deepseek-ai/cordis/lib/index.js:459-463`）把 `debug` 挡在门外，回调体又是
+   *     `if (type === "warn" || type === "error") startupLogs.push(...)` →
+   *     **`ctx.logger.info` 过了级别门也被回调丢弃**。
+   *  2. 那个 `startupLogs` 数组唯一的写盘机会是启动失败时的
+   *     `@deepseek-ai/dsh/lib/bin.js:158 reportStartupFailure`——文件开头就是
+   *     `WARNING: Raw diagnostics...` + `error: StartupError: dsh: startup failed`。
+   *     所以 `~/.dsh/logs/startup-*.log` 是**崩溃转储**，不是运行日志：健康进程里
+   *     ctx.logger 一个字都不落任何地方。
+   *  3. 宿主 stdout 被 tee 进 `~/.dsh/dsh-web.log`，`console.log` 是运行期**唯一**
+   *     可见面（本机历史证据：那文件里 3016 行 `[dsh-suggest-ghost]` 全是 console）。
+   *
+   * 于是 `6dfcd78`（删 console.log）和 `8e08e2e`（删 ctx.logger.info）连着两轮，
+   * 前者删掉的是唯一的可观测面，后者删掉的是本来就不存在的可观测面。
+   *
+   * 本 seam 是双通道：语义事件走 console.log（固定标记 `[dsh-suggest-ghost][ops-trace]`，
+   * grep 得到，见 docs/internals-cordis-settings-pitfalls.md），故障再补一份
+   * `ctx.logger.warn`，好在**启动失败转储**里也留一份证据。
+   *
+   * 量：每条都对应一个真实发生的通道事件，不在 render / 空转的 document-updated 上打
+   * （空载荷不留痕），同类故障另有节流，见 `traceFault`。
+   */
+  const traceOps = (message: string): void => {
+    console.log(`[dsh-suggest-ghost][ops-trace] ${message}`);
+  };
+
+  /** 同类故障的累计次数（节流用）。 */
+  const faultCounts = new Map<string, number>();
+
+  /**
+   * 故障留痕：console.log（运行期可见）+ `ctx.logger.warn`（崩溃转储里也留一份）。
+   * @param kind - 故障类别。同类**第一次**完整打印，之后每 `every` 次打一条带计数的——
+   *   历史上 `_ops` 清空的 nested-transaction 拒绝在一个进程里刷了 372 行同样的报文，
+   *   那本身就是噪声；但一次都不打就又回到「静默失败」，所以是节流而不是静音。
+   */
+  const traceFault = (kind: string, message: string, every = 50): void => {
+    const seen = (faultCounts.get(kind) ?? 0) + 1;
+    faultCounts.set(kind, seen);
+    if (seen !== 1 && seen % every !== 0) return;
+    traceOps(`${message} [${kind} #${seen}]`);
+    ctx.logger.warn(`dsh-suggest-ghost: ${message}`);
+  };
+
   /** 推给 client 的 `_push` 载荷（结构化形态；写盘前序列化）。 */
   interface ClientPush {
     /** 最新 LLM 建议；null = 清空当前建议。 */
@@ -706,10 +760,29 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     const payload = pendingPushPayload;
     pendingPushPayload = null;
     if (payload === null) return;
+    const rev = pushRev;
     pushInFlight = settingsSvc.update(SUGGEST_GHOST_NAMESPACE, { _push: payload })
-      .catch((error: unknown) => {
-        ctx.logger.warn(`dsh-suggest-ghost: push to client failed: ${String(error)}`);
-      })
+      .then(
+        () => {
+          // 成功也要留痕：#15/#18 的验收判据是「这份载荷到底落盘了没有」。历史数据里
+          // 这条通道只留下 372 次 nested-transaction 拒绝、**一次成功都没记过**，
+          // 于是「从没写」和「写了就失败」在日志里长得一模一样。
+          traceOps(`push landed rev=${rev} bytes=${payload.length}`);
+        },
+        (error: unknown) => {
+          const text = error instanceof Error ? error.message : String(error);
+          // 与 `_ops` 清空同一个结构性拒绝：由 handler 链上发起的写入跑在 HMR 事务的
+          // AsyncLocalStorage 里（取证见 consumeOps 中 `_ops` 清空那段注释）。
+          // ⚠️ 这一次写入是**真丢了**：`pushToClient` 在写前就把 lastPushFingerprint
+          // 置成了本次指纹，所以同内容的下一次 push 会被「无变化」直接跳过，只有某个
+          // 字段真的变了才会重新出盘。修法要动写入路径/合并缓冲，不在本轮范围。
+          if (/cannot be nested/i.test(text)) {
+            traceFault('push-nested', `push refused inside settings transaction (rev=${rev} dropped): ${text}`);
+            return;
+          }
+          traceFault('push-failed', `push to client failed (rev=${rev} dropped): ${text}`);
+        },
+      )
       .finally(() => {
         pushInFlight = null;
         if (pendingPushPayload !== null) flushPush(); // 写入期间又有新载荷 → 续写最新
@@ -757,10 +830,9 @@ export function apply(ctx: Context, config: GenerateConfig): void {
    * 模块变量，供后续语言检测使用。
    *
    * **留痕归这里，不归 `parseHotnessOps`**：解析函数是纯函数（无 ctx，也要被 smoke
-   * 直接驱动），它把丢弃原因当数据返回；本函数是两个调用点（启动补消费 + 
+   * 直接驱动），它把丢弃原因当数据返回；本函数是两个调用点（启动补消费 +
    * `document-updated`）唯一的汇聚处，在这里打日志意味着「新增第三个调用点也自动
-   * 带留痕」。通道是 `ctx.logger.warn`——不是 console.log（`6dfcd78` 那次清理的
-   * 就是 console 调试噪声，见 docs/internals-cordis-settings-pitfalls.md 陷阱 2）。
+   * 带留痕」。通道选择见 `traceOps` 上方那段，**不要**改回 ctx.logger 单通道。
    * @param parsed - 已解析的操作批 + 可选 locale + 可选丢弃原因。
    * @param svc - settings 写面，用于消费后清空 `_ops`。
    */
@@ -774,34 +846,64 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     // 空载荷不走这条：那是消费后的正常态，每次都打就成了噪声。
     const dropped = parsed.rejected;
     if (dropped !== undefined) {
-      ctx.logger.warn(
-        `dsh-suggest-ghost: _ops batch dropped (${dropped.kind}, ${dropped.bytes} bytes): ${dropped.summary}`,
-      );
+      traceFault('ops-dropped', `_ops batch dropped (${dropped.kind}, ${dropped.bytes} bytes): ${dropped.summary}`, 20);
     }
     const ops = parsed.ops;
     if (ops.length === 0) return;
+    // 一批一行 + 每个「会驱动外部动作」的 op 一行：
+    //  - 管理面板一次可以提交几十条 delete/pin/add，逐条打会把 tee 日志刷爆，
+    //    所以纯热表操作只进 kinds 直方图（消费结果由下面那行 applied 给出）；
+    //  - pull / complete 各自会驱动推送或 LLM 调用，才是 #15/#16/#18 验收要追的
+    //    那一次动作，逐条打（实际每批至多一条）。
+    const kinds = new Map<string, number>();
+    for (const op of ops) kinds.set(op.op, (kinds.get(op.op) ?? 0) + 1);
+    traceOps(
+      `ops batch received: n=${ops.length} kinds=${
+        [...kinds].map(([kind, count]) => (count > 1 ? `${kind}x${count}` : kind)).join(',')
+      }${parsed.locale !== undefined ? ` locale=${parsed.locale}` : ''}`,
+    );
     for (const op of ops) {
       if (op.op === 'pull') {
-        ctx.logger.info(`dsh-suggest-ghost: consumeOps pull, sessionId = ${op.sessionId}`);
+        traceOps(`ops consumed: pull session=${op.sessionId} (应答走 pushToClient)`);
         // 无论历史环可不可得都应答：环缺失（会话尚未进店/已销毁）时 statePushOf
         // 会省略 history（client 保留现值），但热度与对账后的建议照常送达——
         // 静默丢弃会让 client 永远等不到这一轮对账。
         pushToClient(statePushOf(op.sessionId));
       } else if (op.op === 'complete') {
-        ctx.logger.info(`dsh-suggest-ghost: consumeOps complete, sessionId = ${op.sessionId}, draft = ${JSON.stringify(op.draft)}`);
+        // 草稿只打长度不打正文：留痕要能对上号，但不能把用户输入抄进 tee 日志。
+        traceOps(`ops consumed: complete session=${op.sessionId} draftChars=${op.draft.length}`);
         handleComplete(op.sessionId, op.draft);
       }
     }
     const changed = persistence.applyOps(ops);
-    if (changed > 0) ctx.logger.info(`dsh-suggest-ghost: hotness ops applied (${changed} changed)`);
+    traceOps(`hotness ops applied: batch=${ops.length} changed=${changed} tableSize=${hotness.size}`);
     void persistence.flush();
     // 消费完成：清空操作队列（下一次 watch 触发时 ops 为空，直接跳过）。
-    // 清空失败也要留痕：失败意味着这份载荷**还留在盘上**，client 的写后读回会看到
-    // 它、下一次 document-updated 会把它当新载荷重放一遍（ops 幂等，但现象得能查）。
+    //
+    // ⚠️ **这次清空历史上几乎必然失败，而且失败是被静默吞掉的**（373 次里 372 次
+    // `HMR transactions cannot be nested`）。机制：`SettingsForms.write()` 在
+    // `configEditor.edit()` 的回调**内**调 `this.describe()`
+    // （`@deepseek-ai/dsh-settings/lib/index.js:510`），而 `describe()` 就地
+    // `emit("settings/document-updated")`（同文件 :435）→ 本回调跑在
+    // `@deepseek-ai/dsh-hmr/lib/index.js:284` 的 `executing.run(true, ...)` 里 →
+    // 这里的 `update` 再进 `runExclusive`，:280 的
+    // `if (this.executing.getStore()) return Promise.reject(new Error("HMR transactions cannot be nested"))`
+    // 直接拒绝。**排到下一个 tick 也逃不掉**：`executing` 是 AsyncLocalStorage，
+    // 上下文沿 await/microtask/timer 继续传播（本机实测：事务内建的 setTimeout
+    // 回调里 `getStore()` 仍是 true；只有事务外建立的上下文才是 undefined）。
+    // 修法要动写入路径（可靠的事务外锚点），不在本轮范围——这里先把它**分诊**出来：
+    // nested 拒绝按已知结构性失败节流，其他错误一次一打。
     void svc.update(SUGGEST_GHOST_NAMESPACE, { _ops: EMPTY_PUSH }).then(
-      () => { /* 清空成功是常态，不打日志 */ },
+      () => {
+        traceOps('_ops cleared after consume');
+      },
       (error: unknown) => {
-        ctx.logger.warn(`dsh-suggest-ghost: _ops clear failed (ops will be re-read on next update): ${String(error)}`);
+        const text = error instanceof Error ? error.message : String(error);
+        if (/cannot be nested/i.test(text)) {
+          traceFault('ops-clear-nested', `_ops clear refused inside settings transaction (payload stays on disk; re-consume is blocked only by the in-process payload guard): ${text}`);
+          return;
+        }
+        traceFault('ops-clear-failed', `_ops clear failed (payload stays on disk and will be re-read on next update): ${text}`);
       },
     );
   };
