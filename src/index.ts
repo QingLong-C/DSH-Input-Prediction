@@ -33,6 +33,13 @@ import {
 } from './coldstart.js';
 import { SUGGEST_EVENT } from './domain.js';
 import type { SuggestGhostHotEntry, SuggestGhostSuggested } from './domain.js';
+import {
+  DeferredWriteQueue,
+  DEFERRED_PUMP_MS,
+  decideClearOpsDrain,
+  decidePushDrain,
+} from './deferred-writes.js';
+import type { DeferredItem, DeferredKind, DeferredPushItem } from './deferred-writes.js';
 import { faultSignature } from './fault-signature.js';
 import { flattenConfig, resolveConfig } from './generate.js';
 import type { Config as GenerateConfig, FlatConfig, ResolvedPluginConfig } from './generate.js';
@@ -284,6 +291,11 @@ export function apply(ctx: Context, config: GenerateConfig): void {
   // 字段，载荷结构不变）。
   let settingsSvc: { update: (ns: unknown, patch: object) => Promise<void> } | null = null;
   /**
+   * 事务外排水锚点的定时器句柄（`apply()` 期建立，卸载时清掉；建它的时机就是这条修复
+   * 的全部依据，见 `drainDeferred` 的注释）。null = 尚未建立（settings 服务未注入）。
+   */
+  let deferredPump: ReturnType<typeof setInterval> | null = null;
+  /**
    * **默认层**：boot 时 `resolveConfig` 产物的拍平视图。
    *
    * `resolved = resolveConfig(config)` 是**深冻结的首次解析快照**——内核每次配置
@@ -449,6 +461,26 @@ export function apply(ctx: Context, config: GenerateConfig): void {
         return;
       }
       settingsSvc = svc;
+      // **事务外排水锚点**：被 `HMR transactions cannot be nested` 拒掉的写入由它补。
+      //
+      // 建在这里（`apply()` 的同步续体、settings 服务刚就位）是这条修复的**前提**，不是
+      // 风格偏好：`setInterval` 捕获的是建它那一刻的 `AsyncLocalStorage` 上下文，而 boot
+      // 期 `apply()` 不在 HMR 事务内，此刻 store 是 undefined，于是这个定时器以后每次
+      // 触发都写得进盘。lead 用 `DSH_GHOST_ALSPROBE` 在同一构建上五种上下文各写一次实测：
+      //
+      // ```
+      // PROBE boot-now:              OK  in 1437ms
+      // PROBE handler-sync:          OK  in 1463ms
+      // PROBE handler-microtask:     OK  in 1722ms
+      // PROBE boot-setTimeout-5s:    OK  in  146ms     ← apply() 期建的定时器：能写
+      // PROBE boot-setInterval-8s:   OK  in  147ms     ← apply() 期建的 interval：能写
+      // ```
+      //
+      // 同一次跑里 `completion` 的 await 续体内的真实推送 FAIL（nested，after=1ms）：
+      // 差别不在「等了多久」，在**上下文在哪儿建立**。所以这段绝不能被挪进任何 handler
+      // 或 await 续体，也不会「随便找个地方建都行」。间隔 500ms 的依据见
+      // `DEFERRED_PUMP_MS`；队列空时回调只做一次布尔判断就 return。
+      if (deferredPump === null) deferredPump = setInterval(drainDeferred, DEFERRED_PUMP_MS);
       // 服务就位 → 标脏并立刻预热一次实时视图。#19 遗留段的旧写法是
       // `liveSettings = flattenConfig(resolved)`——重读的仍是冻结的 boot 快照，
       // 等于没刷新；现在改走 describe()，此后设置页的改动无需重启即生效。
@@ -758,8 +790,21 @@ export function apply(ctx: Context, config: GenerateConfig): void {
   let lastPushFingerprint: string | null = null;
   let pushInFlight: Promise<void> | null = null;
   let pendingPushPayload: string | null = null;
+  /**
+   * 待写载荷对应的指纹。必须与载荷**成对**挂在缓冲上：在途写期间又排进来新载荷时，
+   * `lastPushFingerprint` 已经是最新那一份的指纹，拿它当「被拒这份」的指纹会让补写
+   * 判定把一份仍是最新的载荷误判成「已被取代」（见 `decidePushDrain` 的 superseded）。
+   */
+  let pendingPushFingerprint: string | null = null;
   /** 待写载荷里是否带续写（#15/#18 的验收对象；节流必须绕不过它）。 */
   let pendingCarriesCompletion = false;
+  /**
+   * 最近一次**成功落盘**的 `_push` 载荷原文（不是指纹：指纹不区分「同一份字节写过」）。
+   * 补写前比一下，同一份字节已在盘上就不要再推一次 revision。
+   */
+  let lastLandedPushPayload: string | null = null;
+  /** 被事务拒绝的写入的待补写队列（排水锚点见 `deferredPump` 那段注释）。 */
+  const deferred = new DeferredWriteQueue();
   /** 本次推送进入合并缓冲的时刻（被拒留痕里算出等待时长）。 */
   let pushStartedAt = 0;
   const pushToClient = (p: ClientPush): void => {
@@ -798,6 +843,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     };
     // 合并缓冲：若已有在途写入，只更新「最新待写」；flush 在途完成后补写。
     pendingPushPayload = JSON.stringify(payload);
+    pendingPushFingerprint = fingerprint;
     // 判据取入参 p，不取序列化后的 payload：payload 的类型是条件展开出来的联合，
     // 有一支根本没有 completion 键。
     // null = 显式作废，不是「带续写」；只有真带文本的那次才值得不节流地告警。
@@ -808,8 +854,10 @@ export function apply(ctx: Context, config: GenerateConfig): void {
   const flushPush = (): void => {
     if (settingsSvc === null || pushInFlight !== null) return;
     const payload = pendingPushPayload;
+    const fingerprint = pendingPushFingerprint;
     const carriesCompletion = pendingCarriesCompletion;
     pendingPushPayload = null;
+    pendingPushFingerprint = null;
     pendingCarriesCompletion = false;
     if (payload === null) return;
     const rev = pushRev;
@@ -819,27 +867,34 @@ export function apply(ctx: Context, config: GenerateConfig): void {
           // 成功也要留痕：#15/#18 的验收判据是「这份载荷到底落盘了没有」。历史数据里
           // 这条通道只留下 372 次 nested-transaction 拒绝、**一次成功都没记过**，
           // 于是「从没写」和「写了就失败」在日志里长得一模一样。
+          lastLandedPushPayload = payload;
           traceOps(`push landed rev=${rev} bytes=${payload.length}${carriesCompletion ? ' withCompletion=1' : ''}`);
         },
         (error: unknown) => {
           const text = error instanceof Error ? error.message : String(error);
           // 与 `_ops` 清空同一个结构性拒绝：由 handler 链上发起的写入跑在 HMR 事务的
           // AsyncLocalStorage 里（取证见 consumeOps 中 `_ops` 清空那段注释）。
-          // ⚠️ 这一次写入是**真丢了**：`pushToClient` 在写前就把 lastPushFingerprint
-          // 置成了本次指纹，所以同内容的下一次 push 会被「无变化」直接跳过，只有某个
-          // 字段真的变了才会重新出盘。修法要动写入路径/合并缓冲，不在本轮范围。
           if (/cannot be nested/i.test(text)) {
             // 带续写的丢弃**不节流**：push-nested 每 50 次才记一条，而恰恰是这一次丢了
             // 用户等的东西；被 #2..#49 吞掉就等于把 #15 的结论又藏回去了。
             if (carriesCompletion) {
-              traceOps(`push dropped inside settings transaction rev=${rev} carriedCompletion=1 after=${Date.now() - pushStartedAt}ms: ${text}`);
+              traceOps(`push refused inside settings transaction rev=${rev} carriedCompletion=1 after=${Date.now() - pushStartedAt}ms: ${text}`);
             }
-            traceFault('push-nested', `push refused inside settings transaction (rev=${rev} dropped${carriesCompletion ? ' carriedCompletion=1' : ''}): ${text}`,
+            traceFault('push-nested', `push refused inside settings transaction (rev=${rev} queued${carriesCompletion ? ' carriedCompletion=1' : ''}): ${text}`,
               carriesCompletion ? 1 : 50);
-            // 写前就置了指纹，所以同内容下次会被「无变化」跳过 → 这次推送是**永久丢**。
-            // 清掉指纹，让下一个非事务写点（回合结束等）把同一份载荷补出去；不改变
-            // 「handler 内写不了」这个根因，只是不再让一次拒绝变成静默的永久失败。
-            lastPushFingerprint = null;
+            // **主路径：排队补写**，交给 apply() 期建立的事务外 pump（见下面
+            // `drainDeferred` 那段与 `deferred-writes.ts` 顶部 lead 实测的五行探针）。
+            // 旧写法这里只把 `lastPushFingerprint` 清空、指望「下一个非事务写点」把同一份
+            // 载荷顺带补出去。那只能当兜底：它要求之后恰好还有一次**内容变了**的推送落在
+            // 事务外，而续写载荷偏偏只在生成完成那一瞬间存在，之后再没人推同一份内容，
+            // 于是载荷永远到不了客户端（issue #18 的 `bceac31` 持续捎带 lastCompletion
+            // 解决的是「载荷存在时间短」，解决不了「这次写不进盘」）。
+            // 排队之后**不**清指纹：载荷已经在槽里，清了指纹反而让同一内容的下一次推送
+            // 再走一遍必被拒的即时写；槽项被丢弃且没有落盘时才把指纹放开（见
+            // `releaseDeferredPushFingerprint`）。
+            if (fingerprint !== null) {
+              deferred.enqueuePush({ payload, fingerprint, carriesCompletion }, Date.now());
+            }
             return;
           }
           traceFault('push-failed', `push to client failed (rev=${rev} dropped): ${text}`);
@@ -850,6 +905,154 @@ export function apply(ctx: Context, config: GenerateConfig): void {
         if (pendingPushPayload !== null) flushPush(); // 写入期间又有新载荷 → 续写最新
       });
   };
+
+  /**
+   * 槽里的 push 项被丢弃且没落盘时放开指纹。
+   *
+   * 排队期间指纹是**留着的**（载荷已在槽里，清了指纹反而让同内容的下一次推送再走一遍
+   * 注定被拒的即时写）。只有补写最终没成（淘汰 / 判定跳过）时才清掉，把旧的兜底路径
+   * 「下一个非事务写点顺带把同一份载荷补出去」接回来，于是一次被拒不会变成静默的永久失败。
+   * 只在「这份载荷仍是当前最新的意图」时清：已经被更新载荷取代（指纹不等）时不该动，
+   * 清了会把新载荷的去重也一并弄丢。
+   */
+  const releaseDeferredPushFingerprint = (item: DeferredPushItem): void => {
+    if (lastPushFingerprint === item.fingerprint) lastPushFingerprint = null;
+  };
+
+  /**
+   * 留痕里的通道名：`push` / `_ops clear`。与成功那条（`deferred push landed` /
+   * `deferred _ops cleared after consume`）保持同一前缀，「同一件事的三种结局」用
+   * `grep 'deferred '` 一次看全。
+   */
+  const deferredLabel = (kind: DeferredKind): string => (kind === 'push' ? 'push' : '_ops clear');
+
+  /**
+   * 事务外排水锚点：把被 nested 拒绝、已排进槽的写入补出去。
+   *
+   * **为什么定时器能写进去、而 handler 的 await 续体不能**：`setInterval` 捕获的是
+   * **建它的那一刻**的 `AsyncLocalStorage` 上下文（内核事务见
+   * `@deepseek-ai/dsh-hmr/lib/index.js:270` 的 `executing = new AsyncLocalStorage()`、
+   * :280 的 `if (this.executing.getStore()) return Promise.reject(new Error("HMR
+   * transactions cannot be nested"))`、:284 的 `executing.run(true, operation)`）。
+   * 上下文沿 `await` / microtask / **事务内建的 timer** 传播，所以「排到下一个 tick」
+   * 逃不出去；而 boot 期 `apply()` 不在事务内，此刻 store 是 undefined，于是这个定时器
+   * 以后每次触发都在事务外。lead 在同一构建上用 `DSH_GHOST_ALSPROBE` 五种上下文各写
+   * 一次实测：
+   *
+   * ```
+   * PROBE boot-now:              OK  in 1437ms
+   * PROBE handler-sync:          OK  in 1463ms
+   * PROBE handler-microtask:     OK  in 1722ms
+   * PROBE boot-setTimeout-5s:    OK  in  146ms     ← apply() 期建的定时器：能写
+   * PROBE boot-setInterval-8s:   OK  in  147ms     ← apply() 期建的 interval：能写
+   * ```
+   *
+   * 同一次跑里，`completion` 的 await 续体内的真实推送是 FAIL（nested，after=1ms）。
+   *
+   * ⚠️ **建它的位置是这条修复的前提**：只能在 `apply()` 的同步续体里（见下面
+   * `ctx.inject(['settings'])` 中 `settingsSvc` 就位处）。挪进任何 handler / await 续体，
+   * 捕获的上下文就变成 store=true，补写会静默退回今天的行为。
+   *
+   * 每 tick 只补**一个**槽（两个槽最坏两个 tick 排空）。队列空时必须立刻 return：
+   * 这个定时器常年空转，空转成本 = 一次 `isEmpty()` 布尔判断，**不得**每 tick 去
+   * `describe()` / 读盘 / 构造载荷。
+   */
+  function drainDeferred(): void {
+    if (deferred.isEmpty()) return;
+    const svc = settingsSvc;
+    if (svc === null) return; // 服务未注入：没有写面，槽留着下次 tick
+    const now = Date.now();
+    // 先淘汰「补了也没意义」的项，再取：顺序反过来就会把陈旧载荷先写回去。
+    for (const evicted of deferred.evict(now)) {
+      const item = evicted.item;
+      traceOps(
+        `deferred ${deferredLabel(item.kind)} dropped reason=${evicted.reason} age=${evicted.ageMs}ms attempts=${evicted.attempts}`
+        + `${item.kind === 'push' ? ` rev=${item.rev ?? 'n/a'} carriedCompletion=${item.carriesCompletion ? 1 : 0}` : ''}`,
+      );
+      if (item.kind === 'push') releaseDeferredPushFingerprint(item);
+    }
+    if (deferred.isEmpty()) return;
+    const item = deferred.take();
+    if (item === null) return;
+    const queuedAt = item.enqueuedAt;
+
+    if (item.kind === 'push') {
+      // 安全约束二（`_push` 那一半）：不得用陈旧载荷盖掉更新的盘上状态。
+      // 草稿比对用宿主已有的最新事实：`completionCache` 里该会话上一次成功生成的那份
+      // draft。拿不到（无缓存 / 载荷读不出 draft）时**不猜**，由 8s 时间上限兜底。
+      const knownDraft = item.completionSessionId === null
+        ? null
+        : completionCache.get(item.completionSessionId)?.draft ?? null;
+      const decision = decidePushDrain(item, {
+        lastPushFingerprint,
+        lastLandedPayload: lastLandedPushPayload,
+        latestCompletionDraft: knownDraft,
+      });
+      if (decision.action === 'skip') {
+        traceOps(
+          `deferred push skipped reason=${decision.reason} rev=${item.rev ?? 'n/a'} carriedCompletion=${item.carriesCompletion ? 1 : 0} age=${Date.now() - queuedAt}ms`,
+        );
+        if (decision.reason !== 'already-landed') releaseDeferredPushFingerprint(item);
+        return;
+      }
+      void svc.update(SUGGEST_GHOST_NAMESPACE, { _push: item.payload }).then(
+        () => {
+          lastLandedPushPayload = item.payload;
+          // 验收就看这条：`deferred ` 前缀把它和正常即时写路径（`push landed rev=…`）
+          // 分开，二者同时出现才说明「即时被拒 → 事务外补写成功」这条链真的走通了。
+          traceOps(
+            `deferred push landed rev=${item.rev ?? 'n/a'} carriedCompletion=${item.carriesCompletion ? 1 : 0} after=${Date.now() - queuedAt}ms attempts=${item.attempts + 1}`,
+          );
+        },
+        (error: unknown) => retryDeferred(item, error),
+      );
+      return;
+    }
+
+    // 安全约束二（`_ops` 那一半）：**盘上比对走 `readOps()`**，它经 settings 服务的
+    // `describe()` 现读 `_ops` 的值，是插件内唯一权威源（`consumeOps` 传进来的
+    // `consumedPayload` 就是同一函数的返回值，两者同口径才可比）。不相等 = 期间 client
+    // 又写了新载荷 = 这次清空会吃掉未消费的 op ⇒ 放弃（不是重试）。
+    const decision = decideClearOpsDrain(item, readOps());
+    if (decision.action === 'skip') {
+      traceOps(
+        `deferred _ops clear skipped reason=${decision.reason} age=${Date.now() - queuedAt}ms attempts=${item.attempts}`
+        + ' (新载荷留在盘上，由它自己的 document-updated → consumeOps 排自己的清空)',
+      );
+      return;
+    }
+    void svc.update(SUGGEST_GHOST_NAMESPACE, { _ops: EMPTY_PUSH }).then(
+      () => {
+        traceOps(`deferred _ops cleared after consume after=${Date.now() - queuedAt}ms attempts=${item.attempts + 1}`);
+      },
+      (error: unknown) => retryDeferred(item, error),
+    );
+  }
+
+  /**
+   * 补写又被拒：放回原槽计数一次（带尝试上限与超龄淘汰，见 `deferred-writes.ts`）。
+   *
+   * 留痕必须与**首次被拒**不同名（`deferred-*` 而不是 `push-nested`），否则「事务外的
+   * pump 也写不进」这个和根因等价的结论会被同类计数器按首次拒绝的签名一起吞掉。
+   */
+  function retryDeferred(item: DeferredItem, error: unknown): void {
+    const text = error instanceof Error ? error.message : String(error);
+    const nested = /cannot be nested/i.test(text);
+    // 留痕里用通道名（`push` / `_ops clear`）而不是槽名，与成功那条的前缀一致，好 grep。
+    const label = deferredLabel(item.kind);
+    const requeued = deferred.retry(item);
+    if (requeued) {
+      traceFault(
+        `deferred-${item.kind}-${nested ? 'nested' : 'failed'}`,
+        `deferred ${label} write refused again in the apply()-time pump (attempts=${item.attempts + 1} age=${Date.now() - item.enqueuedAt}ms${nested ? ', pump context is inside a transaction' : ''}): ${text}`,
+        10,
+      );
+      return;
+    }
+    // 在途期间同种槽已经被更新的入队占住：旧项确实被取代了，丢弃并放开指纹。
+    traceOps(`deferred ${label} dropped reason=superseded-on-retry age=${Date.now() - item.enqueuedAt}ms`);
+    if (item.kind === 'push') releaseDeferredPushFingerprint(item);
+  }
 
   /**
    * 组装某会话的**当前权威状态**并推给 client：历史环按需从日志物化（ringFor，
@@ -902,6 +1105,11 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     parsed: ParsedOpsResult,
     svc: { update: (ns: unknown, patch: object) => Promise<void> },
   ): void => {
+    // **同步**抓一份本次消费的 `_ops` 载荷原文：清空被拒时要连它一起排队，补写前拿它
+    // 与盘上现值比（见 `decideClearOpsDrain`）。不能等回调里再读 `lastOpsPayload`——
+    // 那时它可能已经被下一次 `document-updated` 推进成新载荷了，拿新值比新值必然相等，
+    // CAS 就退化成「无条件清空」，恰好丢掉这条约束要防的那种竞态。
+    const consumedPayload = lastOpsPayload;
     // 捎带的 UI 语言：有则更新（last-wins），无则保持上次值。
     if (parsed.locale !== undefined) clientUiLocale = parsed.locale;
     // 整批丢弃必须可见（#17：客户端写了、宿主没动、日志一个字都没有）。
@@ -953,8 +1161,9 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     // 直接拒绝。**排到下一个 tick 也逃不掉**：`executing` 是 AsyncLocalStorage，
     // 上下文沿 await/microtask/timer 继续传播（本机实测：事务内建的 setTimeout
     // 回调里 `getStore()` 仍是 true；只有事务外建立的上下文才是 undefined）。
-    // 修法要动写入路径（可靠的事务外锚点），不在本轮范围——这里先把它**分诊**出来：
-    // nested 拒绝按已知结构性失败节流，其他错误一次一打。
+    // 现在两层一起做：**nested 拒绝排进事务外 pump 的槽**（`deferred-writes.ts`），
+    // 补写前按盘上现值做一次 CAS；其余错误仍一次一打、不排队（它们不是结构性的，
+    // 载荷留在盘上等下一次 `document-updated` 就够了）。
     void svc.update(SUGGEST_GHOST_NAMESPACE, { _ops: EMPTY_PUSH }).then(
       () => {
         traceOps('_ops cleared after consume');
@@ -962,7 +1171,13 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       (error: unknown) => {
         const text = error instanceof Error ? error.message : String(error);
         if (/cannot be nested/i.test(text)) {
-          traceFault('ops-clear-nested', `_ops clear refused inside settings transaction (payload stays on disk; re-consume is blocked only by the in-process payload guard): ${text}`);
+          // **主路径：排队**，由事务外 pump 补做清空（理由与 `flushPush` 的 nested 分支
+          // 同源，见 `deferred-writes.ts` 顶部）。排进去的是**本次已消费的载荷原文**，
+          // 补写前拿它与盘上现值比一次，不相等就放弃（见 `decideClearOpsDrain`）。
+          // 载荷留在盘上等补清空的代价是「进程重启后可能重放一次」（index 启动对账那段
+          // 已记），而在盘上有新载荷时无条件清空会把 client 刚写、还没消费的 op 直接吃掉。
+          deferred.enqueueClearOps(consumedPayload, Date.now());
+          traceFault('ops-clear-nested', `_ops clear refused inside settings transaction (queued for the apply()-time pump; payload stays on disk until then; re-consume is blocked only by the in-process payload guard): ${text}`);
           return;
         }
         traceFault('ops-clear-failed', `_ops clear failed (payload stays on disk and will be re-read on next update): ${text}`);
@@ -1070,8 +1285,12 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     }
   });
 
-  // 插件卸载时中止所有在途生成（建议 + 续写）。
+  // 插件卸载时中止所有在途生成（建议 + 续写），并停掉排水定时器（它跨 apply 存活，
+  // partialReload 会把旧的那份留在事件循环里，槽队列与 settingsSvc 都是旧闭包的，
+  // 留着就成了无人认领的写入源）。
   ctx.effect(() => () => {
+    if (deferredPump !== null) clearInterval(deferredPump);
+    deferredPump = null;
     for (const state of tracked) state.pending?.controller.abort();
     for (const controller of completionPending.values()) controller.abort();
   });
