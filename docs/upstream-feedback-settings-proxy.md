@@ -11,7 +11,7 @@
 > 报告方：dsh-suggest-ghost 插件（`src/client/index.ts` 的 `writeOps`，修复见 `a864545`
 > 与本轮的 `src/client/settings-result.ts`）。
 >
-> 本文有两个诉求，**第二个比第一个更根本**：
+> 本文有三个诉求，**第二个比第一个更根本**，第三个是文档/默认值层面的（不改 API 也能少踩坑）：
 >  - **诉求一**（冲突为何对客户端表现为成功）：机制本轮**已在源码里定位**，不再是未闭环
 >    问题；现在请维护者确认「折进 `RemoteResult` 后照常兑现」是设计意图，并确认
 >    `code` 的重映射（`SETTINGS_CONFLICT` → `settings/conflict`）是稳定契约。
@@ -257,3 +257,26 @@ settings 写入，必被拒**。而「消费完清空队列」「应答 pull」�
 dsh-suggest-ghost 分支 `fix/issue-16-18-cleanup`，基线 commit `1eb708d`；本文行号与 diff
 核对于该基线。内核侧行号核对于本机
 `@deepseek-ai/dsh-settings@0.2.0-rc.2`（2026-10-19）。
+
+## 诉求三：三个默认值/文档层面的缺口，让插件作者以为"必须重启"
+
+都不是 API 变更请求，是**默认值与文档**层面的，成本极低但每人都要重踩一遍：
+
+1. **`hmr` 的 `root: []`**。base bundle 用它启用 HMR，README 写明空数组时"只保留 explicit
+   configuration watches"。后果是：默认配置下**没有任何模块源码被监听**，插件作者的第一反应就是
+   "改宿主代码必须重启"。而第二层更隐蔽：默认 `ignored` 含 `**/node_modules`，开发期插件是 `link:`
+   挂在 `profiles/<p>/node_modules/<包名>` 下的，所以**即使把 root 恢复成 `["."]` 也监听不到它**。
+   请求：在插件开发文档里把这两条写在一起（现在分开写在两处，单看任一条都得不出正确结论），
+   或提供一个"开发用" profile 模板把 root/ignored 一起配好。
+2. **`ctx.logger` 在健康进程里不落任何地方**。全局唯一 exporter
+   （`dsh-app-boot/lib/index.js:4053-4066`）`levels:{default:2}` 丢 debug、回调只收 warn/error 所以
+   info 也丢，而 `startupLogs` 只在启动失败时由 `dsh/lib/bin.js:158` 写盘。后果是插件作者把诊断
+   写进 `logger.debug/info` 后**什么都看不到**，会误判成"代码没执行"（本仓 issue #20 记过一次），
+   或者反过来把 `console.log` 当唯一出路、再被下一轮"清理调试噪声"删掉语义留痕。
+   请求：给运行期日志一条正式落点（哪怕就是把 info 收到一个可 tail 的文件），并在文档里写清
+   "插件里的诊断该往哪儿打"。
+3. **`volatile()` 字段是否持久化没有明确契约**。本插件的 `_ops`/`_push` 实测写在 profile 文档里
+   （`cordis.patch.yml` 中能看到两行），而插件代码里此前普遍按"不落盘"假设写注释与判据。
+   叠加诉求二（消费后回写清空被事务拒绝），实际行为是"载荷长期滞留 + 新实例启动即重放"。
+   请求：文档明确 volatile 字段的持久化语义（写在哪、何时被清、重启后是否可见）。
+
