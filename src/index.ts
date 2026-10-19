@@ -35,9 +35,10 @@ import { flattenConfig, resolveConfig } from './generate.js';
 import type { Config as GenerateConfig, FlatConfig, ResolvedPluginConfig } from './generate.js';
 import { generateSuggestion, generateCompletion, sessionEvents } from './generate.js';
 import { sanitizeCompletion } from './inline.js';
+import { createLiveSettings } from './live-settings.js';
 import { parseHotnessOps, setupHotnessPersistence } from './hotness-store.js';
 import { applySuggestGhostProjection, initSuggestGhostProjection, suggestGhostSchema } from './projection.js';
-import { EMPTY_PUSH, effectiveConfig, SUGGEST_GHOST_NAMESPACE } from './settings.js';
+import { EMPTY_PUSH, mergeLiveConfig, SUGGEST_GHOST_NAMESPACE } from './settings.js';
 import { PROJECTION_KEY } from './domain.js';
 import type { SuggestGhostProjection } from './domain.js';
 
@@ -237,12 +238,85 @@ export function apply(ctx: Context, config: GenerateConfig): void {
   // 持久化频次（宿主未挂 storageDomain 时自动降级为纯内存）。
   const { hotness, persistence } = setupHotnessPersistence(ctx);
 
-  // 读取生成配置的 live 值：Config 里的 volatile 引用（用户可调项）优先，
-  // 未覆盖的字段回退到 schema 默认值。状态经 `_push` volatile 字段推给 client
+  // 读取生成配置的 live 值：状态经 `_push` volatile 字段推给 client
   // （0.1.7 移除了 settings.yaml：字段载体从 SettingsScope 换成 volatile 配置
   // 字段，载荷结构不变）。
-  let liveSettings: FlatConfig = flattenConfig(resolved);
   let settingsSvc: { update: (ns: unknown, patch: object) => Promise<void> } | null = null;
+  /**
+   * **默认层**：boot 时 `resolveConfig` 产物的拍平视图。
+   *
+   * `resolved = resolveConfig(config)` 是**深冻结的首次解析快照**——内核每次配置
+   * 写入走 `configEditor.edit → mergeLayers → 重解析`，替换 fiber 持有的新 config，
+   * 旧引用不回填（issue #19 的根因）。所以这份只能当默认值 / describe() 不可用时的
+   * 回退，**不能**当实时值：#19 遗留段正是 `liveSettings = flattenConfig(resolved)`
+   * 与 `effective()` 的两个入参同源、都在重读这份冻结快照，导致设置页改开关在运行中
+   * 不生效（boot 前改好才正常）。
+   */
+  const bootSettings: FlatConfig = flattenConfig(resolved);
+  /**
+   * **覆盖层**：用户可调项的实时视图，源自 `settings.describe()`（每次现读
+   * `entry.fiber.config` 并展开 volatile，是插件内唯一可靠的实时值来源——与已修的
+   * `readOps` 同一依据，只是这次用整个 `row.value`，而不只是 `_ops`）。
+   *
+   * 失效语义（缓存策略；热路径必读这段）：
+   *  - **事件驱动为主**：`settings/document-updated(ns)` 命中本 ns 时 `invalidate()`
+   *    标脏，**下一次读**才现调用 describe() 一次。事件风暴期间 N 次标脏合并成 1 次
+   *    describe()，成本上界 = 读次数（每次生成 / 推送至多一次）而非事件次数。
+   *  - **命中缓存零成本**：未脏且未过 TTL 时 `effective()` 返回同一个对象引用，
+   *    不碰 describe()、不新建对象（`handleComplete` 每次续写、`statePushOf` 每次
+   *    推送都要读，属高频）。
+   *  - **TTL 兜底（默认 5s）**：万一监听没挂上 / 内核在别的 ownerContext 上 emit，
+   *    最迟 5s 后自愈；代价是最多每 5s 一次 describe()。
+   *  - **安全回退**：`settingsSvc` 未注入（启动早期）或 describe() 抛异常时沿用
+   *    上一次权威快照（初值即 boot 默认层），永不抛——host 不能因读设置崩。两条
+   *    失败路径都**清脏**（不做注定失败的重试，见 `live-settings.createLiveSettings`
+   *    第 4 条），所以本回调里注入就位时**显式** `invalidate()` 一次，实时值在就位后
+   *    的第一次读就到，不必等 TTL。
+   *  - `_ops` / `_push` 是 volatile **传输载体**而非设置项，由 `live-settings` 的
+   *    `FlatConfig` 键白名单挡在外面，不会被当配置值读进 effective()。
+   */
+  let liveSettingsFailed = false;
+  const liveSettings = createLiveSettings({
+    ns: SUGGEST_GHOST_NAMESPACE,
+    // 必须是 getter 形态：settingsSvc 在 ctx.inject 回调里才就位。
+    readDescribe: () => {
+      const svc = settingsSvc as { describe?: () => unknown } | null;
+      if (svc === null || typeof svc.describe !== 'function') return undefined;
+      return svc.describe();
+    },
+    // 合并策略：默认层 = bootSettings，覆盖层 = describe() 提炼的实时值；
+    // mergeLiveConfig 保留「provider/model 留空 = 继承主请求路由」的既有语义，并让
+    // 「在设置页清空路由对」这一动作实时生效（boot 是旧读取结果，不是独立配置层）。
+    merge: mergeLiveConfig,
+    // 诊断走 ctx.logger（不新增 console.log 债务）。注意 describe() 失败的 TTL 重试
+    // 是每 5s 一次，所以只在「真异常」上打一次 warn，恢复时补一条 info。
+    onRefresh: (info) => {
+      if (info.ok) {
+        if (liveSettingsFailed) {
+          liveSettingsFailed = false;
+          ctx.logger.info('dsh-suggest-ghost: live settings recovered');
+        }
+        ctx.logger.debug?.(`dsh-suggest-ghost: live settings refreshed (rev=${String(info.revision)}, applied=${info.applied})`);
+        return;
+      }
+      if (info.reason === 'describe-threw') {
+        if (!liveSettingsFailed) {
+          liveSettingsFailed = true;
+          ctx.logger.warn(`dsh-suggest-ghost: live settings describe() failed, falling back to boot snapshot: ${String(info.error)}`);
+        }
+        return;
+      }
+      // 服务还没注入：boot 早期属预期，静默降级成 boot 视图。
+      ctx.logger.debug?.(`dsh-suggest-ghost: live settings not ready (${String(info.reason)})`);
+    },
+  });
+  /**
+   * 当前生效配置 = boot 默认层 + describe() 实时覆盖层（身份记忆化：未刷新时
+   * 返回同一个对象，读它是免费的）。describe() 不可用时退化成 boot 视图。
+   */
+  const effective = (): FlatConfig => liveSettings.snapshot(bootSettings);
+  /** 热度快照的 top-K 上限：同属用户可调项，必须读实时视图而不是冻结快照。 */
+  const historySnapshotCap = (): number => effective().historyMaxEntries;
   /**
    * `_ops` 的最后一次已消费载荷。0.1.7 的 volatile 字段是**引用**（`Volatile<T>`），
    * 内核写入时替换引用而非改原对象；`settings/document-updated` 只带
@@ -296,7 +370,11 @@ export function apply(ctx: Context, config: GenerateConfig): void {
         return;
       }
       settingsSvc = svc;
-      liveSettings = flattenConfig(resolved);
+      // 服务就位 → 标脏并立刻预热一次实时视图。#19 遗留段的旧写法是
+      // `liveSettings = flattenConfig(resolved)`——重读的仍是冻结的 boot 快照，
+      // 等于没刷新；现在改走 describe()，此后设置页的改动无需重启即生效。
+      liveSettings.invalidate();
+      effective();
       // 重启/重载对账：`_push` 是建议（不可重建的 LLM 输出）唯一的持久载体。
       // volatile 字段不落盘（内核用同一判据把它从 profile 文档里剔除），故
       // 内存里没有跨进程残留——这里只需消化启动前 client 抢跑写入的 `_ops`。
@@ -321,14 +399,9 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       const eventCtx = (ctx as unknown as { root?: typeof ctx }).root ?? ctx;
       eventCtx.on('settings/document-updated', (ns: string, revision?: number) => {
         if (ns !== SUGGEST_GHOST_NAMESPACE) return;
-        // 三点对照：①内核 raw（configEditor 条目）②插件捕获的 volatile 引用 ③describe 值
-        try {
-          const editor = (ctx as unknown as { configEditor?: { entries(): Array<{ options: { id: string }; config?: Record<string, unknown> }> } }).configEditor;
-          const row = editor?.entries?.().find((r) => r.options.id === SUGGEST_GHOST_NAMESPACE);
-          const rawOps = row?.config?._ops;
-          const refOps = (resolved as { _ops?: { get?: () => unknown } })._ops?.get?.();
-        } catch { /* noop */ }
-        liveSettings = flattenConfig(resolved);
+        // 事件驱动失效：下一次 effective() 现读一次 describe()（风暴期间 N 次事件
+        // 合并成 1 次读，见 live-settings.createLiveSettings 的失效语义）。
+        liveSettings.invalidate();
         const payload = readOps();
         if (payload === lastOpsPayload) {
           return;
@@ -341,7 +414,6 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       ctx.logger.warn(`dsh-suggest-ghost: settings wiring failed: ${String(error)}`);
     }
   });
-  const effective = (): FlatConfig => effectiveConfig(flattenConfig(resolved), liveSettings);
 
   // —— 每会话历史环：最近用户消息文本（时间序），供 client 历史前缀补全 ——
   // 0.1.2 起会话快照不再向插件暴露对话 nodes；历史文本改由 host 侧维护并经
@@ -666,7 +738,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     return {
       suggestion: fields.suggestion,
       suggestionSessionId: fields.sessionId,
-      hot: hotness.snapshot(liveSettings.historyMaxEntries),
+      hot: hotness.snapshot(historySnapshotCap()),
       total: hotness.size,
       history: ring === undefined ? null : ring.slice(-HISTORY_PUSH_CAP),
       historySessionId: ring === undefined ? null : sessionId,
@@ -731,13 +803,16 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       if (pending.turn === turn) return;
       pending.controller.abort();
     }
+    // 本回合的生效配置：只读一次，保证「是否关 LLM」与「热度 top-K」出自同一
+    // 快照（两次读之间若有 document-updated，会拿到跨新旧的值对）。
+    const turnCfg = effective();
     // LLM 建议被用户关闭：跳过模型调用（省 token），但热度照常推进并推送，
     // 历史前缀补全不受影响；同时把残留建议清空，避免幽灵残留。
-    if (effective().llmEnabled === false) {
+    if (turnCfg.llmEnabled === false) {
       state.pending = undefined;
       state.lastSuggestedTurn = turn;
       trackSuggestion(session.id, null); // 关闭 LLM：本会话建议作废（其他会话不受影响）
-      const hot = hotness.snapshot(liveSettings.historyMaxEntries);
+      const hot = hotness.snapshot(turnCfg.historyMaxEntries);
       pushToClient({
         suggestion: null,
         suggestionSessionId: null,
@@ -769,7 +844,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
           // 其频次参与历史补全打分（新近度为主、频次为辅）；「跨会话搜索」
           // 开关仅在 client 端决定是否把这些文本并作候选。历史环随推：client
           // 端补全的文本源（0.1.2 会话快照已不对插件暴露对话 nodes）。
-          const hot = hotness.snapshot(liveSettings.historyMaxEntries);
+          const hot = hotness.snapshot(historySnapshotCap());
           trackSuggestion(session.id, result.suggestion ?? null);
           pushToClient({
             suggestion: result.suggestion ?? null,
@@ -787,7 +862,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
           ctx.logger.warn(`dsh-suggest-ghost: suggestion generation failed: ${message}`);
           // 失败也推送：清掉残留幽灵 + 把错误摘要带给 client/设置页（可诊断）。
           trackSuggestion(session.id, null);
-          const hot = hotness.snapshot(liveSettings.historyMaxEntries);
+          const hot = hotness.snapshot(historySnapshotCap());
           pushToClient({
             suggestion: null,
             suggestionSessionId: null,
