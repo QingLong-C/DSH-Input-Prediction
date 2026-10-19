@@ -98,6 +98,22 @@ All notable changes to this project will be documented in this file.
   原因文本保留，所以签名不会退化成常量。`scripts/fault-signature-smoke.mjs` 六组断言里
   最关键的一组就是「四类不同故障必须落在四个桶」
 
+### 开发工具
+
+- 新增 `scripts/dev-sandbox.mjs`：一条命令拉起**隔离的第二个 DSH 实例**用于验证宿主层改动
+  （`pnpm run sandbox` / `sandbox:check`）。隔离做在两层：`DSH_HOME` 独立（`sessions`/`storages`/
+  `logs` 全部落沙箱），以及**插件产物独立**（私有 `lib/` 副本，其余依赖逐条软链，不跑 install）。
+  后者是必须的：否则往沙箱里放未验证构建，会污染 live 宿主下次重启真正加载的那份 `lib/`。
+  实测：父进程退出后子进程存活，改 `lib/index.js` 内容触发重新 apply（`apply called` 的 mtime 变）。
+- 过程中钉住三件事：① profile 里 `dsh-host-webserver` 的 `port: 3081` 必须换掉，`--port 0`
+  只管主 GUI 端口（不换会 `EADDRINUSE` → `webServer` 缺失 → 实例跑第一个 agent 回合时自行退出，
+  我一度误判成"热重载杀进程"）；② `_push` 是跨 16 行的单引号标量，按行删会把它改坏（
+  `stripKeyBlock` 按缩进整块删，`scripts/dev-sandbox-smoke.mjs` 反向验过：退化成按行删即报红）；
+  ③ group 成员无法用 `--patch` 叠加层禁用（`webhook-webserver` 嵌在 `webhook-listener` 的
+  `config:` 列表里，overlay 指 group 或叶子都不生效），所以走换端口而不是禁用
+- 另两处自记的坑也写进了脚本注释：日志 fd 必须归子进程（父进程接管道则它退出后子进程写日志
+  吃 EPIPE 而死）；`pkill -f` 的模式串会匹配到调用方自己的命令行
+
 ### 已知缺口
 
 - #17 要求「schema 拒绝路径必须留痕」，那行日志（`parseHotnessOps` 打印 issues 摘要）已随 main 的
