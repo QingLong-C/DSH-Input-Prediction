@@ -33,6 +33,7 @@ import {
 } from './coldstart.js';
 import { SUGGEST_EVENT } from './domain.js';
 import type { SuggestGhostHotEntry, SuggestGhostSuggested } from './domain.js';
+import { faultSignature } from './fault-signature.js';
 import { flattenConfig, resolveConfig } from './generate.js';
 import type { Config as GenerateConfig, FlatConfig, ResolvedPluginConfig } from './generate.js';
 import { generateSuggestion, generateCompletion, sessionEvents } from './generate.js';
@@ -318,7 +319,15 @@ export function apply(ctx: Context, config: GenerateConfig): void {
   let liveSettingsFailed = false;
   /** 上一次已留痕的实时快照 revision（按 revision 去重，避免 TTL 刷新反复打行）。 */
 
-  /** 同类故障的累计次数（节流用）。 */
+  /**
+   * 同类故障的累计次数（节流用）。
+   *
+   * 键是 **kind + 归一化后的错误签名**，不是光 kind。原因：按 kind 计数的话，
+   * 「路由缺失」打了一次之后，第 2..49 次里如果混进一个**完全不同性质**的新故障
+   * （锁超时、模型 4xx、投影服务缺失），它会被同一个计数器一起吞掉——那等于把
+   * #17 的教训又犯一遍，而且这次是主动犯的。按签名分桶后：同类只报计数，
+   * 新类立刻独立报第一条。签名里抹掉会话 id 与耗时，避免同一原因被拆成无数桶。
+   */
   const faultCounts = new Map<string, number>();
 
   /**
@@ -328,8 +337,9 @@ export function apply(ctx: Context, config: GenerateConfig): void {
    *   那本身就是噪声；但一次都不打就又回到「静默失败」，所以是节流而不是静音。
    */
   const traceFault = (kind: string, message: string, every = 50): void => {
-    const seen = (faultCounts.get(kind) ?? 0) + 1;
-    faultCounts.set(kind, seen);
+    const key = `${kind}|${faultSignature(message)}`;
+    const seen = (faultCounts.get(key) ?? 0) + 1;
+    faultCounts.set(key, seen);
     if (seen !== 1 && seen % every !== 0) return;
     traceOps(`${message} [${kind} #${seen}]`);
     ctx.logger.warn(`dsh-suggest-ghost: ${message}`);
