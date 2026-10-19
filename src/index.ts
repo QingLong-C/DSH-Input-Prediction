@@ -276,6 +276,58 @@ export function apply(ctx: Context, config: GenerateConfig): void {
    *    `FlatConfig` 键白名单挡在外面，不会被当配置值读进 effective()。
    */
   let liveSettingsFailed = false;
+  /** 上一次已留痕的实时快照 revision（按 revision 去重，避免 TTL 刷新反复打行）。 */
+  /**
+   * `_ops` / `_push` 通道的**语义留痕**唯一落点。
+   *
+   * ⚠️ **这里必须是 `console.log`。改回 `ctx.logger` 单通道等于把留痕删掉**——三条
+   * 本机 0.2.0-rc.2 产物里核对过的事实（issue #20 只记到了第 1 条的一半）：
+   *  1. 宿主全局**只注册了一个 logger exporter**：
+   *     `@deepseek-ai/dsh-app-boot/lib/index.js:4053-4066`。它 `levels: { default: 2 }`
+   *     （cordis 级别 error0 / info1 / warn2 / debug3，见
+   *     `@deepseek-ai/cordis/lib/index.js:459-463`）把 `debug` 挡在门外，回调体又是
+   *     `if (type === "warn" || type === "error") startupLogs.push(...)` →
+   *     **`ctx.logger.info` 过了级别门也被回调丢弃**。
+   *  2. 那个 `startupLogs` 数组唯一的写盘机会是启动失败时的
+   *     `@deepseek-ai/dsh/lib/bin.js:158 reportStartupFailure`——文件开头就是
+   *     `WARNING: Raw diagnostics...` + `error: StartupError: dsh: startup failed`。
+   *     所以 `~/.dsh/logs/startup-*.log` 是**崩溃转储**，不是运行日志：健康进程里
+   *     ctx.logger 一个字都不落任何地方。
+   *  3. 宿主 stdout 被 tee 进 `~/.dsh/dsh-web.log`，`console.log` 是运行期**唯一**
+   *     可见面（本机历史证据：那文件里 3016 行 `[dsh-suggest-ghost]` 全是 console）。
+   *
+   * 于是 `6dfcd78`（删 console.log）和 `8e08e2e`（删 ctx.logger.info）连着两轮，
+   * 前者删掉的是唯一的可观测面，后者删掉的是本来就不存在的可观测面。
+   *
+   * 本 seam 是双通道：语义事件走 console.log（固定标记 `[dsh-suggest-ghost][ops-trace]`，
+   * grep 得到，见 docs/internals-cordis-settings-pitfalls.md），故障再补一份
+   * `ctx.logger.warn`，好在**启动失败转储**里也留一份证据。
+   *
+   * 量：每条都对应一个真实发生的通道事件，不在 render / 空转的 document-updated 上打
+   * （空载荷不留痕），同类故障另有节流，见 `traceFault`。
+   */
+  const traceOps = (message: string): void => {
+    console.log(`[dsh-suggest-ghost][ops-trace] ${message}`);
+  };
+
+  /** 同类故障的累计次数（节流用）。 */
+  const faultCounts = new Map<string, number>();
+
+  /**
+   * 故障留痕：console.log（运行期可见）+ `ctx.logger.warn`（崩溃转储里也留一份）。
+   * @param kind - 故障类别。同类**第一次**完整打印，之后每 `every` 次打一条带计数的——
+   *   历史上 `_ops` 清空的 nested-transaction 拒绝在一个进程里刷了 372 行同样的报文，
+   *   那本身就是噪声；但一次都不打就又回到「静默失败」，所以是节流而不是静音。
+   */
+  const traceFault = (kind: string, message: string, every = 50): void => {
+    const seen = (faultCounts.get(kind) ?? 0) + 1;
+    faultCounts.set(kind, seen);
+    if (seen !== 1 && seen % every !== 0) return;
+    traceOps(`${message} [${kind} #${seen}]`);
+    ctx.logger.warn(`dsh-suggest-ghost: ${message}`);
+  };
+
+  let lastLiveTracedRevision: number | undefined;
   const liveSettings = createLiveSettings({
     ns: SUGGEST_GHOST_NAMESPACE,
     // 必须是 getter 形态：settingsSvc 在 ctx.inject 回调里才就位。
@@ -298,15 +350,21 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       if (info.ok) {
         if (liveSettingsFailed) {
           liveSettingsFailed = false;
-          ctx.logger.info('dsh-suggest-ghost: live settings recovered');
+          traceOps('live settings recovered (describe() available again)');
         }
-        ctx.logger.debug?.(`dsh-suggest-ghost: live settings refreshed (rev=${String(info.revision)}, applied=${info.applied})`);
+        // 只在 **revision 变化**时留痕：onRefresh 每次刷新尝试都会回调（TTL 5s 到点也
+        // 触发），照抄进来就又造出一场 #21 式的洪水。#19 的验收判据恰好就是「改了有没有
+        // 被重新读到」，它等价于 revision 变了，所以按 revision 过滤不丢信息。
+        if (info.revision !== lastLiveTracedRevision) {
+          lastLiveTracedRevision = info.revision;
+          traceOps(`live settings refreshed rev=${String(info.revision)} applied=${info.applied}`);
+        }
         return;
       }
       if (info.reason === 'describe-threw') {
         if (!liveSettingsFailed) {
           liveSettingsFailed = true;
-          ctx.logger.warn(`dsh-suggest-ghost: live settings describe() failed, falling back to boot snapshot: ${String(info.error)}`);
+          traceFault('live-settings-failed', `live settings describe() failed, falling back to boot snapshot: ${String(info.error)}`, 20);
         }
         return;
       }
@@ -614,55 +672,6 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     );
   };
 
-  /**
-   * `_ops` / `_push` 通道的**语义留痕**唯一落点。
-   *
-   * ⚠️ **这里必须是 `console.log`。改回 `ctx.logger` 单通道等于把留痕删掉**——三条
-   * 本机 0.2.0-rc.2 产物里核对过的事实（issue #20 只记到了第 1 条的一半）：
-   *  1. 宿主全局**只注册了一个 logger exporter**：
-   *     `@deepseek-ai/dsh-app-boot/lib/index.js:4053-4066`。它 `levels: { default: 2 }`
-   *     （cordis 级别 error0 / info1 / warn2 / debug3，见
-   *     `@deepseek-ai/cordis/lib/index.js:459-463`）把 `debug` 挡在门外，回调体又是
-   *     `if (type === "warn" || type === "error") startupLogs.push(...)` →
-   *     **`ctx.logger.info` 过了级别门也被回调丢弃**。
-   *  2. 那个 `startupLogs` 数组唯一的写盘机会是启动失败时的
-   *     `@deepseek-ai/dsh/lib/bin.js:158 reportStartupFailure`——文件开头就是
-   *     `WARNING: Raw diagnostics...` + `error: StartupError: dsh: startup failed`。
-   *     所以 `~/.dsh/logs/startup-*.log` 是**崩溃转储**，不是运行日志：健康进程里
-   *     ctx.logger 一个字都不落任何地方。
-   *  3. 宿主 stdout 被 tee 进 `~/.dsh/dsh-web.log`，`console.log` 是运行期**唯一**
-   *     可见面（本机历史证据：那文件里 3016 行 `[dsh-suggest-ghost]` 全是 console）。
-   *
-   * 于是 `6dfcd78`（删 console.log）和 `8e08e2e`（删 ctx.logger.info）连着两轮，
-   * 前者删掉的是唯一的可观测面，后者删掉的是本来就不存在的可观测面。
-   *
-   * 本 seam 是双通道：语义事件走 console.log（固定标记 `[dsh-suggest-ghost][ops-trace]`，
-   * grep 得到，见 docs/internals-cordis-settings-pitfalls.md），故障再补一份
-   * `ctx.logger.warn`，好在**启动失败转储**里也留一份证据。
-   *
-   * 量：每条都对应一个真实发生的通道事件，不在 render / 空转的 document-updated 上打
-   * （空载荷不留痕），同类故障另有节流，见 `traceFault`。
-   */
-  const traceOps = (message: string): void => {
-    console.log(`[dsh-suggest-ghost][ops-trace] ${message}`);
-  };
-
-  /** 同类故障的累计次数（节流用）。 */
-  const faultCounts = new Map<string, number>();
-
-  /**
-   * 故障留痕：console.log（运行期可见）+ `ctx.logger.warn`（崩溃转储里也留一份）。
-   * @param kind - 故障类别。同类**第一次**完整打印，之后每 `every` 次打一条带计数的——
-   *   历史上 `_ops` 清空的 nested-transaction 拒绝在一个进程里刷了 372 行同样的报文，
-   *   那本身就是噪声；但一次都不打就又回到「静默失败」，所以是节流而不是静音。
-   */
-  const traceFault = (kind: string, message: string, every = 50): void => {
-    const seen = (faultCounts.get(kind) ?? 0) + 1;
-    faultCounts.set(kind, seen);
-    if (seen !== 1 && seen % every !== 0) return;
-    traceOps(`${message} [${kind} #${seen}]`);
-    ctx.logger.warn(`dsh-suggest-ghost: ${message}`);
-  };
 
   /** 推给 client 的 `_push` 载荷（结构化形态；写盘前序列化）。 */
   interface ClientPush {
