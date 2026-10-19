@@ -1,43 +1,63 @@
 #!/usr/bin/env node
 /**
- * 一次性隔离测试实例（Gitea issue #20 / #22 的开发回路工具）。
+ * 一次性隔离的 DSH 第二实例（插件开发回路工具）。
  *
- * ## 它解决的问题
+ * ## 为什么需要它
  *
- * 插件宿主代码改动要生效， normally 得重启 DSH —— 而重启会打断人正在跑的会话，
- * 于是"改完等重启"变成一轮一轮的浪费（#20 记的就是这个）。本脚本造一个**独立实例**：
+ * 插件宿主层改动要生效，默认得重启 DSH —— 而重启会打断人正在跑的会话，于是"改完等重启"
+ * 一轮一轮地烧时间。本脚本起一个独立实例，隔离做在两层：
  *
- * - `DSH_HOME` 独立 → `sessions` / `storages` / `logs` 全部落进沙箱目录，实测不写真实家目录；
- * - **插件产物也独立**（私有副本），所以往沙箱里放探针/未验证构建，不会污染 live 宿主
- *   下次重启要加载的那个 `lib/`；
- * - 其余依赖逐个软链到真实 profile 的 node_modules，**不跑 install**（几秒建好，不吃磁盘）。
+ * 1. `DSH_HOME` 独立 → `sessions` / `storages` / `logs` 全落进沙箱目录。实测 `dshHomePath()`
+ *    认这个环境变量（`dsh-home-paths/lib/index.js:73-84`），所以不会写到真实家目录。
+ * 2. **插件产物也独立**：沙箱里 `node_modules/<本包名>` 指向一份私有副本，其余依赖逐条软链到
+ *    真实 profile 的 node_modules，**不跑 install**（几秒建好、不吃磁盘）。这层是必须的：否则往
+ *    沙箱放未验证构建，会污染 live 宿主下次重启真正加载的那份 `lib/`。
  *
- * ## 两个已踩过的坑（脚本按踩坑后的写法实现，别改回去）
+ * ## 通用性：脚本不含插件专有知识
  *
- * 1. `cordis.patch.yml` 里 `_push` 的值是**跨多行的单引号标量**（建议正文自带换行，本机实测
- *    8 行）。按行 `grep -v` / 逐行删会把续行留给下一个键，直接把 profile 改坏：
+ * 插件身份从当前仓 `package.json` 的 `name` 推导；profile 里的条目 id 再用 `name: <包名>` 反查
+ * （或 `--entry` 指定）。仓特定的东西（要改的端口、要关的顶层条目、验收该 grep 什么）放进该仓
+ * `package.json` 的 `sandbox` 字段，命令行可叠加覆盖：
+ *
+ * ```json
+ * "sandbox": {
+ *   "entry": "suggest-ghost",
+ *   "rewrites": ["port: 3081=port: 3983"],
+ *   "disable": ["our-free-model"],
+ *   "greps": ["apply called; artifact mtime=", "completion generated", "push landed"]
+ * }
+ * ```
+ *
+ * ## 三条实测踩过的坑（改回去就会再踩，实现里都留了注释）
+ *
+ * 1. **profile 里的 volatile 值是跨多行的单引号标量**（本仓 `_push` 实测跨 16~35 行，里面存着
+ *    建议正文）。按行 `grep -v` / 逐行删会把续行留给下一个键，直接改坏 profile：
  *    `historyMinChars expected number but got 3 A","truncated":false,…` → 条目不挂载。
- *    所以剥离必须**按缩进吞掉整块**（`stripKeyBlock`）。
- * 2. 端口 `0.0.0.0:3081` 由 profile 里 `dsh-host-webserver` 钉死，`--port 0` **只管主 GUI 端口**。
- *    第二实例不改它会 `EADDRINUSE` → webServer 服务缺失 → 那次实测实例在跑第一个 agent 回合时
- *    退出。脚本因此必须改这个端口（它是普通单行标量，替换是安全的）。
- *
- * 另记一条限制：**group 成员没法用 `--patch` 叠加层禁用**（`webhook-webserver` 之流嵌在
- * `webhook-listener` 这个 `group: true` 条目的 `config:` 列表里，overlay 指向 group 或叶子都
- * 不生效；顶层条目的 overlay 是生效的）。所以本脚本走"改端口"而不是"禁用"。
+ *    所以剥离一律**按缩进整块删**，且只删本插件条目名下的 `_` 前缀键（别人的 `_x` 可能有意义）。
+ * 2. **`--gui-port` 只管主 GUI 端口**，profile 里被别的插件钉死的监听端口照样会 `EADDRINUSE`；
+ *    webServer 服务缺失会让实例在跑第一个 agent 回合时静默退出。所以脚本扫副本里全部
+ *    `port: <n>`，只要有一个被占就拒绝启动并列出该用什么 `--rewrite` 换掉。替换按**整行相等**
+ *    匹配：用 `/port: 3081$/` 这种没加 `m` 标志的正则，会在该行不在文件末尾时静默不生效（踩过，
+ *    而且当时"端口已改"的提示是无条件打印的假话）。
+ * 3. **group 成员条目关不掉**：`--patch` 叠加层对顶层条目生效，对嵌在 `group: true` 条目 `config:`
+ *    列表里的成员无效（实测指 group 与指叶子都无效）。这类只能改端口/配置绕开。
  *
  * ## 用法
  *
  * ```
- * node scripts/dev-sandbox.mjs --home ~/dsh-sbx --ws ~/dsh-sbx-ws --port 3983 [--watch] [--deploy <dir>]
- * node scripts/dev-sandbox.mjs --check --home ~/dsh-sbx --port 3983      # 只合成校验，不启动
+ * node scripts/dev-sandbox.mjs                  # 建沙箱并后台启动（读仓内 sandbox 配置）
+ * node scripts/dev-sandbox.mjs --check          # 只合成校验，不启动
+ * node scripts/dev-sandbox.mjs --deploy <dir>   # 把某 worktree 构建的 lib/ 装进沙箱
+ * node scripts/dev-sandbox.mjs --home ~/sbx --watch --rewrite 'port: 8080=port: 8081'
  * ```
  *
- * `--watch` 打开宿主层源码热重载（只盯本插件产物目录）。触发要**真改内容**：只 `touch`
- * 换 mtime 不产生第二次 `apply called`（实测），所以要么改 src 后 `--deploy`，要么往
- * 沙箱那份 `lib/index.js` 里追加一行注释。 即重新 apply
- * 即重新 apply —— 判据是日志里再来一行 `apply called; artifact mtime=…`（mtime 必须变）。
- * `--deploy` 把某个 worktree 构建出的 `lib/` 装进沙箱私有副本（不重启、不碰 live）。
+ * `--watch` 打开宿主层源码热重载（只盯本插件私有产物目录）。触发要**真改内容**：只 `touch` 换
+ * mtime 不产生第二次 `apply called`（实测）。判据就是那行 `artifact mtime=` 变没变 —— 没变说明
+ * 进程还在跑旧字节，这一轮的观察一概不算（issue #20 的根子）。
+ *
+ * ⚠️ 依赖"在 `apply()` 期建立的异步上下文"才能工作的东西（例如本仓 #22 的事务外排水 pump）**不能
+ * 用热重载验证**：HMR 的 `partialReload` 跑在 `runExclusive → executing.run(true, …)` 里，那样建
+ * 出来的定时器仍带 `store=true`。这类必须整进程重启。
  */
 import { execFileSync, spawn } from 'node:child_process';
 import {
@@ -47,51 +67,46 @@ import {
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
-const args = process.argv.slice(2);
-const flag = (name) => args.includes(`--${name}`);
+const argv = process.argv.slice(2);
 const opt = (name, dflt) => {
-  const i = args.indexOf(`--${name}`);
-  return i >= 0 && args[i + 1] !== undefined ? args[i + 1] : dflt;
+  const i = argv.indexOf(`--${name}`);
+  return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : dflt;
 };
+const flag = (name) => argv.includes(`--${name}`);
 
-const HOME_ = resolve(opt('home', join(homedir(), 'dsh-sbx-ghost')));
-const WS = resolve(opt('ws', join(homedir(), 'dsh-sbx-ghost-ws')));
-const WS_PORT = Number(opt('port', '3983'));
-const PROFILE = join(HOME_, 'profiles', 'web');
-const PLUGIN = join(HOME_, 'plugin');
-// 真实 profile 与其 node_modules：从家目录推导，不做相对路径猜测（拼错过一次）
-const LIVE_PROFILE = resolve(opt('live-profile', join(homedir(), '.dsh', 'profiles', 'web')));
-const LIVE_NM = resolve(opt('live-nm', join(LIVE_PROFILE, 'node_modules')));
-// 产物来源：默认取当前 git 工作区（脚本可以在任一 worktree 里跑）
-function repoRoot() {
-  const fromFlag = args.indexOf('--repo');
-  if (fromFlag >= 0 && args[fromFlag + 1] !== undefined) return resolve(args[fromFlag + 1]);
-  try {
-    return execFileSync('git', ['-C', process.cwd(), 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim();
-  } catch {
-    return resolve(dirname(dirname(new URL(import.meta.url).pathname)));
+/** 可重复参数（`--rewrite a=b --rewrite c=d` / `--disable x` / `--grep y` / `--strip k`）。 */
+export function collect(list, name) {
+  /** @type {string[]} */
+  const out = [];
+  for (let i = 0; i < list.length; i += 1) {
+    if (list[i] === `--${name}` && list[i + 1] !== undefined) { out.push(list[i + 1]); i += 1; }
   }
+  return out;
 }
-const REPO = repoRoot();
-
-const say = (m) => console.log(`  ${m}`);
-const die = (m) => { console.error(`dev-sandbox: ${m}`); process.exit(1); };
 
 /**
- * 按缩进整块删除一个 YAML 键（含它所有更深缩进的续行）。
- * @param {string} text
- * @param {string} key
- * @returns {{text: string, removed: number}}
+ * 读当前仓配置：包名 + `sandbox` 字段。脚本的通用性靠它 —— 插件专有值不进脚本本体。
+ * @param {string} repo @returns {{pkgName: string, cfg: Record<string, any>}}
+ */
+export function readRepoConfig(repo) {
+  const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
+  if (typeof pkg.name !== 'string' || pkg.name === '') throw new Error(`${repo}/package.json 缺 name`);
+  return { pkgName: pkg.name, cfg: pkg.sandbox ?? {} };
+}
+
+/**
+ * 按缩进整块删除一个 YAML 键（键行 + 比它更深缩进的全部续行）。
+ * @param {string} text @param {string} key @returns {{text: string, removed: number}}
  */
 export function stripKeyBlock(text, key) {
   const lines = text.split('\n');
+  /** @type {string[]} */
   const out = [];
   let i = 0;
   let removed = 0;
   while (i < lines.length) {
     const line = lines[i];
-    const stripped = line.trim();
-    if (stripped.startsWith(`${key}: `)) {
+    if (line.trim().startsWith(`${key}: `)) {
       const indent = line.length - line.trimStart().length;
       let j = i + 1;
       while (j < lines.length) {
@@ -110,194 +125,314 @@ export function stripKeyBlock(text, key) {
   return { text: out.join('\n'), removed };
 }
 
-// 只有被直接执行时才跑主流程：否则 `import { stripKeyBlock } from './dev-sandbox.mjs'`
-// 会顺手把一整个隔离实例启动起来（纯函数就没法被测了）。
-const invokedDirectly = process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
-if (!invokedDirectly) {
-  // 作为模块被引入时只导出工具函数，不做任何副作用
-} else {
-// ── 1. 端口必须真空出来（撞过 EADDRINUSE 导致 webServer 缺失、实例跑回合时退出）──
-function portInUse(port) {
-  try {
-    return execFileSync('ss', ['-ltnH', `( sport = :${port} )`], { encoding: 'utf8' }).trim().length > 0;
-  } catch {
-    return false;
-  }
-}
-if (portInUse(WS_PORT)) die(`端口 ${WS_PORT} 已被占用；换一个（第二实例必须避开 live 钉死的 3081）`);
-
-// ── 2. profile 副本：改端口 + 剥易失载荷 + 只读不改真实 profile ─────────────────
-if (!flag('deploy')) {
-  rmSync(HOME_, { recursive: true, force: true });
-  mkdirSync(PROFILE, { recursive: true });      // profile 副本的目标目录（漏了它 copyFileSync 直接 ENOENT）
-  mkdirSync(join(HOME_, 'logs'), { recursive: true });   // 写流要的是这个目录，建错位置会让启动崩在 spawn 之后
-  for (const f of ['package.json', 'cordis.yml', 'compatibility.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', 'cordis.patch.yml']) {
-    const src = join(LIVE_PROFILE, f);
-    if (existsSync(src)) copyFileSync(src, join(PROFILE, f));
-  }
-  for (const d of ['patches', 'external-plugins']) {
-    const src = join(LIVE_PROFILE, d);
-    if (existsSync(src)) execFileSync('cp', ['-rp', src, PROFILE], { stdio: 'ignore' });
-  }
-  const patchPath = join(PROFILE, 'cordis.patch.yml');
-  let patch = readFileSync(patchPath, 'utf8');
-  // 按行替换：别用 /port: 3081$/ 的正则——没有 m 标志时 $ 只匹配整个字符串末尾，
-  // 端口行不在文件末尾时就静默不替换，实例照样去抢 live 占用的 3081（实测踩过，
-  // 而且当时的"端口已改"提示是无条件打印的假话）。改完必须断言新旧值都在/不在。
-  const lines = patch.split('\n');
-  let hits = 0;
+/**
+ * 只剥**指定条目名下**的易失键（默认：键名以 `_` 开头），别的条目一概不碰。
+ *
+ * 为什么不全局删 `_ops`/`_push`：那是某个插件的键名；别的插件条目里的 `_x` 键可能是有意义的
+ * 配置，全局删等于顺手改了别人的状态。
+ * @param {string} text @param {string} entryId
+ * @param {(key: string) => boolean} [isVolatile]
+ * @returns {{text: string, removed: Array<{key: string, lines: number}>}}
+ */
+export function stripEntryVolatileKeys(text, entryId, isVolatile = (k) => k.startsWith('_')) {
+  const lines = text.split('\n');
+  /** @type {Array<{key: string, at: number, end: number}>} */
+  const found = [];
   for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].trim() === 'port: 3081') {
-      hits += 1;
-      lines[i] = lines[i].replace('port: 3081', `port: ${WS_PORT}`);
+    const m = /^(\s*)- id:\s*(\S+)\s*$/.exec(lines[i]);
+    if (m === null || m[2] !== entryId) continue;
+    const entryIndent = m[1].length;
+    let j = i + 1;
+    while (j < lines.length) {
+      const line = lines[j];
+      if (line.trim() === '') { j += 1; continue; }
+      const indent = line.length - line.trimStart().length;
+      if (indent <= entryIndent) break; // 回到同级/更浅 = 已出条目
+      const kv = /^([A-Za-z0-9_-]+): /.exec(line.trim());
+      if (kv !== null && isVolatile(kv[1])) {
+        let k = j + 1;
+        while (k < lines.length) {
+          const nxt = lines[k];
+          if (nxt.trim() === '') { k += 1; continue; }
+          if (nxt.length - nxt.trimStart().length > indent) { k += 1; continue; }
+          break;
+        }
+        found.push({ key: kv[1], at: j, end: k });
+        j = k;
+        continue;
+      }
+      j += 1;
+    }
+    break; // 同名条目只处理第一处
+  }
+  const drop = new Set();
+  for (const f of found) for (let n = f.at; n < f.end; n += 1) drop.add(n);
+  return { text: lines.filter((_, n) => !drop.has(n)).join('\n'), removed: found.map((f) => ({ key: f.key, lines: f.end - f.at })) };
+}
+
+/**
+ * 解析 `--rewrite '旧整行=新整行'`。整行 trim 相等匹配，不用正则（`$` 少 `m` 标志那次静默失效）。
+ * @param {string[]} specs @returns {Array<{from: string, to: string}>}
+ */
+export function parseRewrites(specs) {
+  return specs.map((spec) => {
+    const i = spec.indexOf('=');
+    if (i <= 0) throw new Error(`--rewrite 需要 '旧行=新行' 形式，收到 ${JSON.stringify(spec)}`);
+    return { from: spec.slice(0, i).trim(), to: spec.slice(i + 1).trim() };
+  });
+}
+
+/**
+ * 应用整行替换；命中数交回调用方决定去留（0 命中必须拒绝启动：静默不替换比报错坏）。
+ * @param {string[]} lines @param {Array<{from: string, to: string}>} rules
+ * @returns {{lines: string[], hits: number[]}}
+ */
+export function applyRewrites(lines, rules) {
+  const hits = rules.map(() => 0);
+  const out = lines.map((line) => {
+    let next = line;
+    rules.forEach((r, k) => {
+      if (next.trim() === r.from) { hits[k] += 1; next = next.replace(r.from, r.to); }
+    });
+    return next;
+  });
+  return { lines: out, hits };
+}
+
+/**
+ * 副本里钉死的监听端口（`port: <n>` 整行）。
+ * @param {string[]} lines @returns {number[]}
+ */
+export function declaredPorts(lines) {
+  const out = new Set();
+  for (const line of lines) {
+    const m = /^\s*port:\s*(\d+)\s*$/.exec(line);
+    if (m !== null) out.add(Number(m[1]));
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/**
+ * 按包名在 profile 里反查条目 id（`- id: X` 后数行内出现 `name: <pkgName>`）。
+ * @param {string} patchText @param {string} pkgName @returns {string | null}
+ */
+export function findEntryId(patchText, pkgName) {
+  const lines = patchText.split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = /^(\s*)- id:\s*(\S+)\s*$/.exec(lines[i]);
+    if (m === null) continue;
+    for (let j = i + 1; j < Math.min(i + 6, lines.length); j += 1) {
+      if (lines[j].trim() === `name: ${pkgName}`) return m[2];
     }
   }
-  if (hits !== 1) die(`profile 里 \`port: 3081\` 命中 ${hits} 处，预期 1 处；先人工确认再改，别猜`);
-  patch = lines.join('\n');
-  if (patch.includes('port: 3081') || !patch.includes(`port: ${WS_PORT}`)) die('端口替换未生效，拒绝启动（否则会抢 live 的 3081）');
-  const ops = stripKeyBlock(patch, '_ops');
-  const push = stripKeyBlock(ops.text, '_push');
-  patch = push.text + '\n# dev-sandbox：关掉公告弹层，它会吃掉指针事件（实测挡过工作区选择）\n- id: our-free-model\n  disabled: true\n';
-  if (flag('watch')) {
-    patch += '\n# dev-sandbox：宿主层源码热重载（只盯本插件私有产物；实测 apply() 期建的 timer 能写 settings）\n'
-      + '- id: hmr\n  disabled: false\n  config:\n    root:\n      - node_modules/dsh-suggest-ghost/lib\n    ignored: []\n    debounce: 100\n';
-  }
-  writeFileSync(patchPath, patch);
-  say(`profile 副本就绪：端口→${WS_PORT}，剥除 _ops ${ops.removed - 0} 行块 / _push ${push.removed} 行块（后者是多行单引号标量，按行删会改坏 profile）`);
-  // 私有插件副本：只放运行所需（src 不进沙箱）
-  rmSync(PLUGIN, { recursive: true, force: true });
-  mkdirSync(PLUGIN, { recursive: true });
-  for (const f of ['package.json', 'cordis.patch.yml', 'icon.svg']) {
-    const src = join(REPO, f);
-    if (existsSync(src)) copyFileSync(src, join(PLUGIN, f));
-  }
-  for (const d of ['lib', 'docs']) {
-    const src = join(REPO, d);
-    if (existsSync(src)) execFileSync('cp', ['-rp', src, PLUGIN], { stdio: 'ignore' });
-  }
-  // node_modules：逐条软链，唯独本插件指向私有副本
-  const nm = join(PROFILE, 'node_modules');
-  mkdirSync(nm, { recursive: true });
-  if (!existsSync(LIVE_NM)) die(`找不到真实 node_modules：${LIVE_NM}`);
-  for (const entry of readdirSync(LIVE_NM)) {
-    if (entry === 'dsh-suggest-ghost') continue;
-    const link = join(nm, entry);
-    if (!existsSync(link) && !lstatSafe(link)) symlinkSync(join(LIVE_NM, entry), link);
-  }
-  const mine = join(nm, 'dsh-suggest-ghost');
-  if (lstatSafe(mine)) rmSync(mine, { recursive: true, force: true });
-  symlinkSync(PLUGIN, mine);
-  chmodSync(HOME_, 0o700);
-  say(`产物独立副本：${mine} → ${PLUGIN}（往这里放构建不会污染 live 要加载的 ${join(REPO, 'lib')}）`);
-} else {
-  if (!existsSync(join(PROFILE, 'node_modules'))) die('沙箱还不存在，先不带 --deploy 建一次');
+  return null;
 }
 
-function lstatSafe(p) { try { lstatSync(p); return true; } catch { return false; } }
+// 只有直接执行才跑主流程：否则 `import { stripKeyBlock }` 会顺手起一个实例，纯函数就没法测。
+const invokedDirectly = process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`;
+if (invokedDirectly) main();
 
-// ── 3. --deploy：把某个 worktree 的构建装进沙箱 ────────────────────────────────
-if (flag('deploy')) {
-  const src = resolve(String(opt('deploy')));
-  if (!existsSync(join(src, 'lib'))) die(`--deploy 指向的目录里没有 lib/：${src}`);
-  rmSync(join(PLUGIN, 'lib'), { recursive: true, force: true });
-  execFileSync('cp', ['-rp', join(src, 'lib'), PLUGIN], { stdio: 'ignore' });
-  say(`已部署构建：${src}/lib → ${PLUGIN}/lib`);
-  if (flag('check')) { console.log('  （--check 到此为止）'); process.exit(0); }
-}
+function main() {
+  const say = (m) => console.log(`  ${m}`);
+  const die = (m) => { console.error(`dev-sandbox: ${m}`); process.exit(1); };
+  const lstatSafe = (p) => { try { lstatSync(p); return true; } catch { return false; } };
+  const portInUse = (port) => {
+    try { return execFileSync('ss', ['-ltnH', `( sport = :${port} )`], { encoding: 'utf8' }).trim().length > 0; }
+    catch { return false; }
+  };
 
-// ── 4. --check：只做合成校验，不启动 ──────────────────────────────────────────
-function findBin() {
-  const fromFlag = opt('bin', null);
-  if (fromFlag) return resolve(fromFlag);
-  try {
-    const found = execFileSync('sh', ['-c', "command -v dsh || true"], { encoding: 'utf8' }).trim();
-    if (found) return found;
-  } catch { /* 继续找 */ }
-  // 退化：在 npx 缓存里找一个 dsh 启动器（缓存目录 id 会变，所以不能写死）
-  const cache = join(homedir(), '.npm', '_npx');
-  for (const dir of readdirSync(cache)) {
-    const cand = join(cache, dir, 'node_modules', '.bin', 'dsh');
-    if (existsSync(cand)) return cand;
+  let REPO = opt('repo', '');
+  if (REPO === '') {
+    try { REPO = execFileSync('git', ['-C', process.cwd(), 'rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim(); }
+    catch { REPO = resolve(dirname(dirname(new URL(import.meta.url).pathname))); }
   }
-  die('找不到 dsh 启动器：用 --bin <path> 指定');
-}
-const BIN = findBin();
-if (flag('check')) {
-  if (!existsSync(BIN)) die(`找不到 dsh 启动器：${BIN}`);
-  const out = execFileSync('node', [BIN, '--profile', 'web', '--dump-config'], {
-    encoding: 'utf8', env: { ...process.env, DSH_HOME: HOME_ }, timeout: 180_000, stdio: ['ignore', 'pipe', 'ignore'],
+  REPO = resolve(REPO);
+  let conf;
+  try { conf = readRepoConfig(REPO); } catch (error) { die(String(error)); }
+  const { pkgName, cfg } = conf;
+  const entryCfg = String(opt('entry', String(cfg.entry ?? '')));
+  const short = (entryCfg || pkgName.split('/').pop() || pkgName).replace(/^dsh-/, '');
+
+  const HOME_ = resolve(opt('home', join(homedir(), `dsh-sbx-${short}`)));
+  const WS = resolve(opt('ws', join(homedir(), `dsh-sbx-${short}-ws`)));
+  const GUI_PORT = String(opt('gui-port', '0'));
+  const PROFILE = join(HOME_, 'profiles', 'web');
+  const PLUGIN = join(HOME_, 'plugin');
+  const LIVE_PROFILE = resolve(opt('live-profile', join(homedir(), '.dsh', 'profiles', 'web')));
+  const LIVE_NM = resolve(opt('live-nm', join(LIVE_PROFILE, 'node_modules')));
+
+  let rules;
+  try { rules = parseRewrites([...asArray(cfg.rewrites), ...collect(argv, 'rewrite')]); }
+  catch (error) { die(String(error)); }
+  const disables = [...asArray(cfg.disable), ...collect(argv, 'disable')];
+  const greps = [...asArray(cfg.greps), ...collect(argv, 'grep')];
+  const extraStrip = collect(argv, 'strip');
+  /** @param {unknown} v @returns {string[]} */
+  function asArray(v) { return Array.isArray(v) ? v.map(String) : []; }
+
+  if (GUI_PORT !== '0' && portInUse(Number(GUI_PORT))) die(`--gui-port ${GUI_PORT} 已被占用`);
+
+  let entryId = entryCfg;
+  if (!flag('deploy')) {
+    rmSync(HOME_, { recursive: true, force: true });
+    mkdirSync(PROFILE, { recursive: true });             // 漏了它，copyFileSync 直接 ENOENT
+    mkdirSync(join(HOME_, 'logs'), { recursive: true }); // 建错位置会让启动崩在 spawn 之后
+    for (const f of ['package.json', 'cordis.yml', 'compatibility.json', 'pnpm-workspace.yaml', 'pnpm-lock.yaml', 'cordis.patch.yml']) {
+      const src = join(LIVE_PROFILE, f);
+      if (existsSync(src)) copyFileSync(src, join(PROFILE, f));
+    }
+    for (const d of ['patches', 'external-plugins']) {
+      const src = join(LIVE_PROFILE, d);
+      if (existsSync(src)) execFileSync('cp', ['-rp', src, PROFILE], { stdio: 'ignore' });
+    }
+    const patchPath = join(PROFILE, 'cordis.patch.yml');
+    if (!existsSync(patchPath)) die(`副本里没有 cordis.patch.yml：${patchPath}`);
+    let patch = readFileSync(patchPath, 'utf8');
+    if (entryId === '') {
+      entryId = findEntryId(patch, pkgName) ?? '';
+      if (entryId === '') say(`⚠ 没按 name: ${pkgName} 反查到条目 id → 跳过易失载荷剥离（可用 --entry <id> 指定）`);
+      else say(`条目 id 反查：${pkgName} → ${entryId}`);
+    }
+    if (rules.length > 0) {
+      const r = applyRewrites(patch.split('\n'), rules);
+      rules.forEach((rule, k) => {
+        if (r.hits[k] === 0) die(`--rewrite 未命中任何行：${JSON.stringify(rule.from)}（profile 结构变了？先人工确认，别猜）`);
+        say(`rewrite 命中 ${r.hits[k]} 处：${rule.from} → ${rule.to}`);
+      });
+      patch = r.lines.join('\n');
+    }
+    const clash = declaredPorts(patch.split('\n')).filter((p) => portInUse(p));
+    if (clash.length > 0) {
+      die(`副本里这些端口已被占用：${clash.join(', ')}。第二实例必须避开 —— 加 `
+        + `--rewrite 'port: ${clash[0]}=port: ${clash[0] + 900}'（group 成员条目 --patch 关不掉，只能改配置）`);
+    }
+    if (entryId !== '') {
+      const st = stripEntryVolatileKeys(patch, entryId);
+      patch = st.text;
+      if (st.removed.length > 0) say(`剥除条目 ${entryId} 的易失载荷：${st.removed.map((r) => `${r.key}(${r.lines}行)`).join('、')}`);
+    }
+    for (const key of extraStrip) {
+      const one = stripKeyBlock(patch, key);
+      patch = one.text;
+      say(`按 --strip 剥除 ${key}：${one.removed} 行`);
+    }
+    if (disables.length > 0) {
+      patch += disables.map((id) => `\n# dev-sandbox：关掉 ${id}\n- id: ${id}\n  disabled: true`).join('\n') + '\n';
+      say(`将禁用顶层条目：${disables.join('、')}（group 成员关不掉）`);
+    }
+    if (flag('watch')) {
+      patch += '\n# dev-sandbox：宿主层源码热重载（只盯本插件私有产物目录）\n'
+        + `- id: hmr\n  disabled: false\n  config:\n    root:\n      - node_modules/${pkgName}/lib\n    ignored: []\n    debounce: 100\n`;
+      say('热重载已开：要**真改内容**才触发（只 touch 换 mtime 无效）');
+    }
+    writeFileSync(patchPath, patch);
+    rmSync(PLUGIN, { recursive: true, force: true });
+    mkdirSync(PLUGIN, { recursive: true });
+    for (const f of ['package.json', 'cordis.patch.yml', 'icon.svg', 'README.md']) {
+      const src = join(REPO, f);
+      if (existsSync(src)) copyFileSync(src, join(PLUGIN, f));
+    }
+    for (const d of ['lib', 'docs']) {
+      const src = join(REPO, d);
+      if (existsSync(src)) execFileSync('cp', ['-rp', src, PLUGIN], { stdio: 'ignore' });
+    }
+    const nm = join(PROFILE, 'node_modules');
+    mkdirSync(nm, { recursive: true });
+    if (!existsSync(LIVE_NM)) die(`找不到真实 node_modules：${LIVE_NM}`);
+    for (const entry of readdirSync(LIVE_NM)) {
+      if (entry === pkgName) continue;
+      const link = join(nm, entry);
+      if (!existsSync(link) && !lstatSafe(link)) symlinkSync(join(LIVE_NM, entry), link);
+    }
+    const mine = join(nm, pkgName);
+    if (lstatSafe(mine)) rmSync(mine, { recursive: true, force: true });
+    symlinkSync(PLUGIN, mine);
+    chmodSync(HOME_, 0o700);
+    say(`产物独立副本：${mine} → ${PLUGIN}（放构建不会污染 live 要加载的 ${join(REPO, 'lib')}）`);
+  } else if (!existsSync(join(PROFILE, 'node_modules'))) {
+    die('沙箱还不存在，先不带 --deploy 建一次');
+  }
+
+  if (flag('deploy')) {
+    const srcArg = opt('deploy', '');
+    if (srcArg === '') die('--deploy 需要一个含 lib/ 的目录路径');
+    const src = resolve(String(srcArg));
+    if (!existsSync(join(src, 'lib'))) die(`--deploy 指向的目录里没有 lib/：${src}`);
+    rmSync(join(PLUGIN, 'lib'), { recursive: true, force: true });
+    execFileSync('cp', ['-rp', join(src, 'lib'), PLUGIN], { stdio: 'ignore' });
+    say(`已部署构建：${src}/lib → ${PLUGIN}/lib`);
+  }
+
+  const BIN = findBin();
+  if (flag('check')) {
+    const out = execFileSync('node', [BIN, '--profile', 'web', '--dump-config'], {
+      encoding: 'utf8', env: { ...process.env, DSH_HOME: HOME_ }, timeout: 180_000, stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const present = entryId === '' ? null : new RegExp(`^- id: ${entryId}$`, 'm').test(out);
+    const bad = out.split('\n').filter((l) => /invalid config|ValidationError/i.test(l)).slice(0, 3);
+    say(`合成校验：条目 ${entryId || '（未指定）'} ${present === null ? '跳过' : present ? '在册 ✓' : '缺失 ✗'}；校验错误 ${bad.length} 条`);
+    for (const b of bad) say(`    ${b.slice(0, 140)}`);
+    process.exit((present === null || present) && bad.length === 0 ? 0 : 1);
+  }
+
+  mkdirSync(WS, { recursive: true });
+  try { execFileSync('git', ['-C', WS, 'rev-parse', '--git-dir'], { stdio: 'ignore' }); }
+  catch { try { execFileSync('git', ['-C', WS, 'init', '-q'], { stdio: 'ignore' }); } catch { /* 非致命 */ } }
+
+  const env = { ...process.env, DSH_HOME: HOME_ };
+  const envFile = join(homedir(), '.dsh', 'env.local');
+  if (existsSync(envFile)) {
+    // 密钥只进子进程环境，绝不复制进沙箱目录（多一份凭据文件就多一份泄露面）
+    for (const line of readFileSync(envFile, 'utf8').split('\n')) {
+      const m = /^export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim());
+      if (m !== null) env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+    }
+    say('已把 ~/.dsh/env.local 注入子进程环境（仅内存，未落进沙箱）');
+  }
+  const log = join(HOME_, 'logs', 'sbx.log');
+  // 日志 fd 归子进程：父进程接管道的话，父进程一退出管道就断，子进程下次写日志吃 EPIPE 而死
+  // （表现为"启动成功、稍后自行退出"，极易被误判成热重载或内核问题）。
+  let logFd;
+  try { logFd = openSync(log, 'a'); } catch (error) { die(`日志打不开 ${log}: ${String(error)}`); }
+  const child = spawn('node', [BIN, '--profile', 'web', '--port', GUI_PORT, '--no-open'], {
+    env, cwd: HOME_, detached: true, stdio: ['ignore', logFd, logFd],
   });
-  const okGhost = /^- id: suggest-ghost$/m.test(out);
-  const bad = out.split('\n').filter((l) => /invalid config|ValidationError/i.test(l)).slice(0, 3);
-  say(`合成配置：suggest-ghost ${okGhost ? '在册 ✓' : '缺失 ✗'}；校验错误 ${bad.length} 条`);
-  for (const b of bad) say(`    ${b.slice(0, 140)}`);
-  process.exit(okGhost && bad.length === 0 ? 0 : 1);
-}
+  child.unref();
+  try { closeSync(logFd); } catch { /* 已关 */ }
+  writeFileSync(join(HOME_, 'sbx.pid'), `${child.pid}\n`);
+  say(`已启动 pid=${child.pid}；停它请用这个 pid —— pkill -f 的模式串会匹配到调用方自己的命令行（踩过两次）`);
 
-// ── 5. 启动 ───────────────────────────────────────────────────────────────────
-mkdirSync(WS, { recursive: true });
-try { execFileSync('git', ['-C', WS, 'rev-parse', '--git-dir'], { stdio: 'ignore' }); }
-catch { try { execFileSync('git', ['-C', WS, 'init', '-q'], { stdio: 'ignore' }); } catch { /* 非致命 */ } }
+  const deadline = Date.now() + 30_000;
+  const tick = () => {
+    const txt = existsSync(log) ? readFileSync(log, 'utf8') : '';
+    const url = (/http:\/\/127\.0\.0\.1:\d+\/\?token=[\w-]+/.exec(txt) ?? [null])[0];
+    if (url === null && Date.now() < deadline) { setTimeout(tick, 2000); return; }
+    console.log('');
+    say(`存活=${lstatSafe(`/proc/${child.pid}`) ? 'yes' : 'NO'}  ${url ?? 'URL 未就绪（看日志）'}`);
+    say(`日志 ${txt.split('\n').length} 行；端口冲突 ${/EADDRINUSE/.test(txt) ? '有 ✗' : '无 ✓'}`);
+    if (greps.length > 0) {
+      console.log('');
+      say('读法：');
+      for (const g of greps) say(`    grep -F '${g}' ${log}`);
+    }
+    process.exit(0); // 子进程自持 fd，父进程退出不影响它
+  };
+  setTimeout(tick, 4000);
 
-const env = { ...process.env, DSH_HOME: HOME_ };
-const envFile = join(homedir(), '.dsh', 'env.local');
-if (existsSync(envFile)) {
-  // 密钥只进子进程环境，绝不复制进沙箱目录（沙箱里出现凭据文件就等于多一份泄露面）
-  for (const line of readFileSync(envFile, 'utf8').split('\n')) {
-    const m = /^export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim());
-    if (m) env[m[1]] = m[2].replace(/^["']|["']$/g, '');
+  function findBin() {
+    const fromFlag = opt('bin', '');
+    if (fromFlag !== '') return resolve(fromFlag);
+    try {
+      const found = execFileSync('sh', ['-c', 'command -v dsh || true'], { encoding: 'utf8' }).trim();
+      if (found !== '') return found;
+    } catch { /* 继续找 */ }
+    const cache = join(homedir(), '.npm', '_npx');
+    if (existsSync(cache)) {
+      for (const dir of readdirSync(cache)) {
+        const cand = join(cache, dir, 'node_modules', '.bin', 'dsh');
+        if (existsSync(cand)) return cand;
+      }
+    }
+    die('找不到 dsh 启动器：用 --bin <path> 指定');
   }
-  say('已把 ~/.dsh/env.local 注入子进程环境（仅内存，未复制到沙箱）');
-}
-const log = join(HOME_, 'logs', 'sbx.log');
-// 日志 fd 必须由子进程自己持有。先前改成"父进程用 createWriteStream 接管道"，父进程
-// 打印完 process.exit() 后管道断裂，子进程下一次写日志吃 EPIPE 直接死 —— 沙箱表现为
-// "启动成功、稍后自行退出"，我一度把它误判成"热重载会杀进程"。
-// 这里用 openSync('a') 把 fd 交给 spawn：追加写，且父进程退出与子进程无关。
-let logFd;
-try {
-  logFd = openSync(log, 'a');
-} catch (error) {
-  die(`日志文件打不开 ${log}: ${String(error)}`);
-}
-const child = spawn('node', [BIN, '--profile', 'web', '--port', '0', '--no-open'], {
-  env, cwd: HOME_, detached: true, stdio: ['ignore', logFd, logFd],
-});
-child.unref();
-try {
-  closeSync(logFd); // 子进程已继承，父进程这边关掉，否则 fd 泄漏
-} catch {
-  /* 已经关了 */
-}
-writeFileSync(join(HOME_, 'sbx.pid'), `${child.pid}\n`);
-say(`已启动 pid=${child.pid}（pidfile: ${join(HOME_, 'sbx.pid')}；停它请用这个 pid，别用 pkill -f，模式串会匹配到自己的命令行）`);
-
-setTimeout(() => {
-  const txt = existsSync(log) ? readFileSync(log, 'utf8') : '';
-  const url = (/http:\/\/127\.0\.0\.1:\d+\/\?token=[\w-]+/.exec(txt) ?? [null])[0];
-  const alive = lstatSafe(`/proc/${child.pid}`);
-  console.log('');
-  say(`存活=${alive ? 'yes' : 'NO'}  URL=${url ?? '（未就绪）'}`);
-  const nested = (txt.match(/PROBE|cannot be nested/g) ?? []).length;
-  say(`日志 ${txt.split('\n').length} 行；端口冲突 ${/EADDRINUSE/.test(txt) ? '有 ✗' : '无 ✓'}；nested/探针痕迹 ${nested}`);
-  console.log('');
-  console.log('读法（跑一次输入→停顿后逐条看）：');
-  for (const g of [
-    'apply called; artifact mtime=',      // 这份进程跑的到底是哪次构建（#20）
-    'completion generated',              // 模型出东西了
-    'completion dropped (empty or filtered)',
-    'completion failed',                 // 常见是 no logged request route：新会话没有已记录请求
-    'push landed', 'push refused inside settings transaction',   // #22 的那一跳（被拒→排队）
-    'deferred push landed', 'deferred _ops cleared',             // 排水锚点真的补上了盘才算修好
-    'pump context is inside a transaction',                      // 出现这条 = 热重载部署踩坑，需整进程重启
-    'live settings refreshed',           // #19
-  ]) say(`    grep -F '${g}' ${log}`);
-}, 26_000);
-
-// 打印完就收手：child.stdout/stderr 的 pipe 会一直吊着事件循环，父进程永不退出
-// （实测脚本因此挂在后台，`| tail` 也就永远等不到输出）。
-// 打印完就退出：子进程自己持有日志 fd，父进程退出不会影响它
-const finish = () => process.exit(0);
-setTimeout(finish, 45_000);
-
 }

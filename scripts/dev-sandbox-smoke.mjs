@@ -14,7 +14,9 @@
  * 用法：node scripts/dev-sandbox-smoke.mjs
  */
 import assert from 'node:assert/strict';
-import { stripKeyBlock } from './dev-sandbox.mjs';
+import {
+  applyRewrites, declaredPorts, collect, findEntryId, parseRewrites, stripEntryVolatileKeys, stripKeyBlock,
+} from './dev-sandbox.mjs';
 
 let cases = 0;
 const run = (name, fn) => {
@@ -76,6 +78,85 @@ run('不存在的键原样返回；重复调用不再变形（幂等）', () => 
 run('导入 dev-sandbox 不产生副作用（只导出纯函数）', () => {
   // 走到这里说明顶层主流程没被执行（否则本进程会去建沙箱、起实例）
   assert.equal(typeof stripKeyBlock, 'function');
+});
+
+
+// ── 通用化新增：条目作用域的易失载荷剥离 ──────────────────────────────────────
+// 顺序有讲究：别人的条目**排在前面**。若实现忽略 entryId、从第一个条目就开删，
+// "不碰别的条目"这条断言就会红。（反序写过一次，变异测试当场漏抓，就是这个原因。）
+const TWO_ENTRIES = [
+  '- id: other-plugin',
+  '  name: dsh-other',
+  '  config:',
+  `    _ops: '{"keep":"me"}'`,                 // 别人条目里的同名键，绝不能被删
+  '    _cacheTtl: 30',
+  '- id: suggest-ghost',
+  '  name: dsh-suggest-ghost',
+  '  config:',
+  '    inlineEnabled: true',
+  "    _ops: '{\"ops\":[{\"op\":\"pull\"}],'",       // 键行：多行单引号标量的开头
+  "      \"seq\":7}'",                               // 它的深缩进续行，必须一起删
+  '    historyMinChars: 3',
+].join('\n');
+
+run('只剥本条目名下的 _ 键，别的条目一概不碰', () => {
+  const { text, removed } = stripEntryVolatileKeys(TWO_ENTRIES, 'suggest-ghost');
+  assert.deepEqual(removed.map((r) => r.key), ['_ops'], `应只剥本条目的 _ops，实得 ${JSON.stringify(removed)}`);
+  assert.equal(removed[0].lines, 2, '键行 + 1 行深缩进续体');
+  assert.ok(!text.includes('"ops"'), '本条目的载荷没删干净');
+  assert.ok(text.includes(`_ops: '{"keep":"me"}'`), '⚠ 误删了 other-plugin 的同名键 —— 全局删就是这个后果');
+  assert.ok(text.includes('_cacheTtl: 30'), '别人条目里非载荷的 _ 键也不该动');
+});
+
+run('本条目的非易失键（inlineEnabled / historyMinChars）全部保留', () => {
+  const { text } = stripEntryVolatileKeys(TWO_ENTRIES, 'suggest-ghost');
+  assert.ok(text.includes('inlineEnabled: true'), 'inlineEnabled 被误删');
+  assert.ok(text.includes('historyMinChars: 3'), '紧随其后的键被续行污染或误删（当年就是这里报 ValidationError）');
+});
+
+run('条目 id 不存在时原样返回（不误删任何东西）', () => {
+  const r = stripEntryVolatileKeys(TWO_ENTRIES, 'no-such-entry');
+  assert.deepEqual(r.removed, []);
+  assert.equal(r.text, TWO_ENTRIES);
+});
+
+run('findEntryId 按 name 反查条目 id', () => {
+  assert.equal(findEntryId(TWO_ENTRIES, 'dsh-suggest-ghost'), 'suggest-ghost');
+  assert.equal(findEntryId(TWO_ENTRIES, 'dsh-other'), 'other-plugin');
+  assert.equal(findEntryId(TWO_ENTRIES, 'dsh-nonexistent'), null);
+});
+
+// ── 通用化新增：整行替换与端口扫描 ────────────────────────────────────────────
+run('rewrite 按整行相等匹配，包含但不相等的行不误伤', () => {
+  const lines = ['        port: 3081', '# port: 3081 是钉死的', 'webPort: 3081'];
+  const r = applyRewrites(lines, parseRewrites(['port: 3081=port: 3983']));
+  assert.deepEqual(r.hits, [1], `只该命中第一行，实得 ${JSON.stringify(r.hits)}`);
+  assert.equal(r.lines[0], '        port: 3983');
+  assert.equal(r.lines[1], '# port: 3081 是钉死的', '注释行被改了');
+  assert.equal(r.lines[2], 'webPort: 3081', '另一个键被误改');
+});
+
+run('rewrite 零命中必须能被调用方发现（当年静默不生效 = 实例去抢 live 端口）', () => {
+  const r = applyRewrites(['no: match here'], parseRewrites(['port: 3081=port: 3983']));
+  assert.deepEqual(r.hits, [0]);
+});
+
+run('declaredPorts 扫出全部钉死端口（不靠硬编码端口号）', () => {
+  const ports = declaredPorts(['  port: 3081', '    port: 8010', '  port: notanumber', 'listen: 3081']);
+  assert.deepEqual(ports, [3081, 8010], `实得 ${JSON.stringify(ports)}`);
+});
+
+run('parseRewrites 拒绝畸形写法', () => {
+  assert.throws(() => parseRewrites(['no-equals-here']), /旧行=新行/);
+  assert.throws(() => parseRewrites(['=only-right']), /旧行=新行/);
+});
+
+// ── 可重复参数 ────────────────────────────────────────────────────────────────
+run('collect 支持同一参数重复出现', () => {
+  const list = ['--rewrite', 'a=b', '--watch', '--rewrite', 'c=d', '--grep', 'x'];
+  assert.deepEqual(collect(list, 'rewrite'), ['a=b', 'c=d']);
+  assert.deepEqual(collect(list, 'grep'), ['x']);
+  assert.deepEqual(collect(list, 'disable'), []);
 });
 
 console.log(`\n${process.exitCode === 1 ? '❌' : '✅'} dev-sandbox-smoke: ${cases} 组用例${process.exitCode === 1 ? '（有失败）' : '全部通过'}`);

@@ -168,8 +168,8 @@ with dsh 0.2.0-rc.2: peerDependencies {…}
 ### 已知取舍与限制
 
 - **旧设置会迁移**：实测 `0.1.5` 时代改过的值（例如 `historyMaxEntries`）在 `0.2.0`
-  上原样恢复——用户层保留在 profile 文档里，只是**运行期的 volatile 引用不落盘**，
-  所以重启后读回的是 profile 里的持久值，而不是上次的内存值。
+  上原样恢复：profile 文档里就存着非默认值（实测有 `historyMaxEntries: 77`、`historyCrossSession: true`），
+  所以重启后读回的是这份持久值，而不是上一次运行的内存值。
 - **client 侧无轮询**：0.1.7 随 `settingsScope` 一起移除的只是 `scope.subscribe`，
   内核另有转发给 client 的事件通道 —— `ctx.remote.$on('settings/document-updated')`
   （在 dsh-api-remotes 的转发白名单内，mode `emit`）。内核自己的设置页即用它驱动
@@ -290,6 +290,10 @@ profile 配置的结果，不是平台限制。DSH 自带插件热重载（`@dee
 就说明还在旧字节码上，此时无论验证结果如何都不作数（这正是 issue #20 那类白跑一轮）。
 客户端侧不需要宿主重启：browser 侧有独立的模块加载机制，刷新页面即可。
 
+不想手工做这些就用 `pnpm run sandbox`（`scripts/dev-sandbox.mjs`）：独立 `DSH_HOME`、独立插件产物副本、
+自动避开被占用的端口、剥掉会重放的遗留载荷，并把该 grep 的留痕串打印出来。脚本本体不含任何插件专有
+知识，本仓专有的值放在 `package.json` 的 `sandbox` 字段（`entry` / `rewrites` / `disable` / `greps`）。
+
 > 限制：`hmr/change` 的重载走内核的 `runExclusive` 事务，因此**重载期间**插件在事件回调里
 > 发起的 settings 写入同样会被拒（`docs/internals-cordis-settings-pitfalls.md` 陷阱 1.5）。
 > 重载后第一次 `_ops` 清空失败属预期，不代表改动没生效，判据是 `apply called` 那行的 mtime。
@@ -309,22 +313,29 @@ profile 配置的结果，不是平台限制。DSH 自带插件热重载（`@dee
   不再各写各的；client 侧 pull 统一在会话绑定成功处发起，冷启动、切会话、会话晚就绪三合一。
 - 热度表恢复完成后（`whenReady`）补推一次完整快照，关掉「恢复窗口内推送了不完整频次」的窗口。
 
-> 与 0.1.5 的差别：那时 `_push` 落 `settings.yaml`，重启后可回读盘上残留的上一条建议；
-> `0.1.7+` 的 volatile 字段不落盘，**重启后上一条建议需要重新生成**（新回合跑完即恢复）。
-> 期间历史前缀补全与热度面板照常可用——它们走的是会话日志与 storage 域，不经 volatile。
-> 注意区分：用户的**设置值**仍在 profile 文档里、照常迁移（见「已知取舍与限制」）。
+> 与 0.1.5 的差别：那时 `_push` 落 `settings.yaml`，重启后可回读盘上残留的上一条建议。
+> `0.1.7+` 之后**别把"volatile 字段不落盘"当成保证**：本插件的 `_ops` / `_push` 实测就写在
+> profile 文档里（`cordis.patch.yml` 中能看到 `_ops: '{"rev":…}'`、`_push: '{"rev":…}'` 两行），
+> 而"消费后清空 `_ops`"在事件回调里会被内核按 nested transaction 拒掉，所以载荷会长期留在盘上。
+> 直接后果是**新实例一启动就重放上一进程遗留的 op**（隔离实例实测：客户端还没连上就消费了一条
+> `complete`）。历史前缀补全与热度面板照常可用——它们走会话日志与 storage 域。
+> 注意区分：用户的**设置值**同样在 profile 文档里、照常迁移（见「已知取舍与限制」）。
 
 ```bash
 pnpm run build       # tsc 编译 host + esbuild 打包 client → lib/
 pnpm run test:smoke  # 纯函数冒烟测试（含热度持久化语义、冷启动语义）
 pnpm run test:e2e    # 真实栈端到端：热度落盘→重启恢复；冷启动重启对账/pull 应答
 pnpm run replay      # 用真实会话日志回放补全管线
+pnpm run sandbox     # 起一个隔离的 DSH 第二实例（不重启，且不碰 live 要加载的产物）
+pnpm run sandbox:check    # 只合成校验；sandbox:deploy <dir> 只装构建
 ```
 
 ## 已知限制
 
 - 跨会话热度表已持久化（宿主 storage 域，落 `~/.dsh/storages/suggest_ghost_hotness.json`）：重启后频次恢复，不再从零累积；宿主无 storage 域（如极简 headless 组合）时自动降级为内存态，重启清零
-- 升级到 `0.1.7+` 后旧设置不自动迁移（volatile 字段不落盘），需按默认值重设一次；详见上方「已知取舍与限制」
+- **别把「volatile 字段不落盘」当保证**：本插件的 `_ops` / `_push` 实测就写在 profile 文档里，而"消费后清空
+  `_ops`"在事件回调里会被内核按 nested transaction 拒掉，所以载荷长期留在盘上，新实例一启动就会重放它
+  （隔离实例实测：客户端还没连上就消费了一条遗留 `complete`）。详见上方冷启动一节与 issue #22
 - 重启后历史补全与上一轮建议立即可用（判据是语义而非重启时机）；但**新回合**的建议仍需等该回合跑完才能生成——这是「预测下一条」的固有代价，不是启动延迟
 - 热度管理面板显示并过滤的是推送的 top-K 快照（默认 50 条，「共 N 条」展示全量）；更大范围的主机侧搜索未做
 - 删除只清当前统计——再次输入同文本会重新计入；「固定」才是不被淘汰的语义

@@ -154,7 +154,8 @@ Three details that only surface when you try them:
 
 ### Known trade-offs
 
-- **Old settings do migrate**: a value tweaked on the `0.1.5` settings page (e.g. `historyMaxEntries`) was measured restoring as-is on `0.2.0` — the user layer stays in the profile document. What is *not* persisted is the in-memory volatile reference, so after a restart you read the persisted profile value rather than last run's memory value.
+- **Old settings do migrate**: a value tweaked on the `0.1.5` settings page was measured restoring as-is on `0.2.0` — the profile document holds non-default values today (`historyMaxEntries: 77`, `historyCrossSession: true`), and a restart reads that persisted value rather than the previous run's memory.
+- **Do not treat "volatile fields are not persisted" as a guarantee**: this plugin's `_ops` / `_push` are written into the profile document, and the clear-after-consume write is refused as a nested transaction, so a payload stays on disk and a fresh instance replays it at boot (measured in an isolated instance: one leftover `complete` was consumed before any client connected). See the cold-start section above and issue #22.
 - **No polling on the client**: what `0.1.7` removed along with `settingsScope` is only `scope.subscribe`. The kernel has a separate Host→client event channel — `ctx.remote.$on('settings/document-updated')`, on dsh-api-remotes' forwarding allowlist (mode `emit`). The kernel's own settings page drives `SettingsDescribeMirror` off exactly that. This plugin subscribes the same way, so `describe()` is issued only when the host actually pushes `_push`, plus once at startup and once per `connection/reset`.
 
 How to reproduce: build an isolated profile for the kernel under test (point `$DSH_HOME` at a temp directory and hardlink its `node_modules` to that kernel tree with `cp -al`, so upward resolution cannot leak into the other generation), then check manifest composition with `dsh --profile <p> --dump-config` — **on 0.2.0 this is the step that surfaces the peer-gate rejection** — and watch plugin loading via `dsh --profile <p> "say hi"` and `dsh --profile <p> -- --no-open --port <p>`. Headless runs stop at `MISSING_CREDENTIAL` (the temp home has no credentials) — a point after plugins have loaded.
@@ -266,7 +267,13 @@ Validate the overlay without booting: `dsh --profile web --patch <file> --dump-c
 that `id: hmr` carries those three keys and no other entry changed.
 
 Once it is on, the log tells you whether a reload happened, so you never verify stale bytecode
-again. Every mount prints one line:
+again. Rather than doing this by hand, `pnpm run sandbox` (`scripts/dev-sandbox.mjs`) handles it: its own
+`DSH_HOME`, its own copy of the plugin artifacts, automatic port avoidance, removal of leftover payloads
+that would otherwise be replayed at boot, and it prints the greps worth watching. The script itself carries
+no plugin-specific knowledge; that lives in this repo's `package.json` under `sandbox` (`entry`, `rewrites`,
+`disable`, `greps`).
+
+Every mount prints one line:
 
 ```
 [dsh-suggest-ghost][ops-trace] apply called; artifact mtime=<mtime of the loaded lib/index.js>
@@ -307,6 +314,8 @@ pnpm run build       # tsc compiles host + esbuild bundles client → lib/
 pnpm run test:smoke  # pure-function smoke tests (incl. hotness persistence and cold-start semantics)
 pnpm run test:e2e    # end-to-end over the real stacks: hotness persist→restore; cold-start reconciliation/pull
 pnpm run replay      # replay the completion pipeline with real session logs
+pnpm run sandbox     # boot an isolated second DSH instance (no restart; live artifacts untouched)
+pnpm run sandbox:check    # composition check only; sandbox:deploy <dir> installs a build only
 ```
 
 ## Known limitations

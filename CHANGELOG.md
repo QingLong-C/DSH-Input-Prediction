@@ -124,6 +124,16 @@ All notable changes to this project will be documented in this file.
 - 另两处自记的坑也写进了脚本注释：日志 fd 必须归子进程（父进程接管道则它退出后子进程写日志
   吃 EPIPE 而死）；`pkill -f` 的模式串会匹配到调用方自己的命令行
 
+### 变更
+
+- `scripts/dev-sandbox.mjs` **通用化**：脚本本体不再含任何插件/本机专有字面量（代码区命中 0 处）。
+  插件身份从 `package.json` 的 `name` 推导、profile 条目 id 用 `name: <包名>` 反查；原先硬编码的
+  三样东西分别变成 `sandbox.rewrites`（整行替换 + 0 命中即拒启动 + 端口占用扫描）、
+  `sandbox.disable`（顶层条目；group 成员无效这点写进 help）、`sandbox.greps`（验收读法）。
+  易失载荷剥离也从"全局删 `_ops`/`_push`"改为**只删本插件条目名下的 `_` 前缀键** —— 全局删会
+  顺手改掉别人条目的状态。`dev-sandbox-smoke` 从 5 组扩到 14 组，并做了两轮变异验证：忽略 entryId、
+  把整行匹配放宽成包含匹配，都能报红（第一处变异起初漏抓，原因是 fixture 把别人条目排在了后面）
+
 ### 已知缺口
 
 按当前代码状态核对过；下面每条都还成立（原先列在这里的四项已关掉，故移除：「#17 留痕被删」与「#16 写后读回」

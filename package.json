@@ -59,7 +59,8 @@
     "replay": "node --experimental-strip-types scripts/replay-history.mjs",
     "check:loop": "node scripts/gitignore-check.mjs && node scripts/artifact-freshness.mjs",
     "sandbox": "node scripts/dev-sandbox.mjs --watch",
-    "sandbox:check": "node scripts/dev-sandbox.mjs --check"
+    "sandbox:check": "node scripts/dev-sandbox.mjs --check",
+    "sandbox:deploy": "node scripts/dev-sandbox.mjs --deploy ."
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -109,5 +110,25 @@
         "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }
+  },
+  "sandbox": {
+    "entry": "suggest-ghost",
+    "rewrites": [
+      "port: 3081=port: 3983"
+    ],
+    "disable": [
+      "our-free-model"
+    ],
+    "greps": [
+      "apply called; artifact mtime=",
+      "completion generated",
+      "completion dropped (empty or filtered)",
+      "completion failed",
+      "push landed",
+      "push refused inside settings transaction",
+      "deferred push landed",
+      "deferred _ops cleared",
+      "live settings refreshed"
+    ]
   }
 }
