@@ -30,13 +30,14 @@ import {
   userTextOfEvent,
 } from './coldstart.js';
 import { SUGGEST_EVENT } from './domain.js';
-import type { HotnessOp, SuggestGhostHotEntry, SuggestGhostSuggested } from './domain.js';
+import type { SuggestGhostHotEntry, SuggestGhostSuggested } from './domain.js';
 import { flattenConfig, resolveConfig } from './generate.js';
 import type { Config as GenerateConfig, FlatConfig, ResolvedPluginConfig } from './generate.js';
 import { generateSuggestion, generateCompletion, sessionEvents } from './generate.js';
 import { sanitizeCompletion } from './inline.js';
 import { createLiveSettings } from './live-settings.js';
 import { parseHotnessOps, setupHotnessPersistence } from './hotness-store.js';
+import type { ParsedOpsResult } from './hotness-store.js';
 import { applySuggestGhostProjection, initSuggestGhostProjection, suggestGhostSchema } from './projection.js';
 import { EMPTY_PUSH, mergeLiveConfig, SUGGEST_GHOST_NAMESPACE } from './settings.js';
 import { PROJECTION_KEY } from './domain.js';
@@ -754,15 +755,29 @@ export function apply(ctx: Context, config: GenerateConfig): void {
    * `_ops` 消费器（watch 触发与启动遗留补消费共用）：pull 走统一的状态组装应答，
    * 其余操作交热表层应用（幂等），最后 flush 并清空队列。捎带的 locale 更新到
    * 模块变量，供后续语言检测使用。
-   * @param parsed - 已解析的操作批 + 可选 locale；空 ops 直接返回（不写盘）。
+   *
+   * **留痕归这里，不归 `parseHotnessOps`**：解析函数是纯函数（无 ctx，也要被 smoke
+   * 直接驱动），它把丢弃原因当数据返回；本函数是两个调用点（启动补消费 + 
+   * `document-updated`）唯一的汇聚处，在这里打日志意味着「新增第三个调用点也自动
+   * 带留痕」。通道是 `ctx.logger.warn`——不是 console.log（`6dfcd78` 那次清理的
+   * 就是 console 调试噪声，见 docs/internals-cordis-settings-pitfalls.md 陷阱 2）。
+   * @param parsed - 已解析的操作批 + 可选 locale + 可选丢弃原因。
    * @param svc - settings 写面，用于消费后清空 `_ops`。
    */
   const consumeOps = (
-    parsed: { readonly ops: readonly HotnessOp[]; readonly locale?: string },
+    parsed: ParsedOpsResult,
     svc: { update: (ns: unknown, patch: object) => Promise<void> },
   ): void => {
     // 捎带的 UI 语言：有则更新（last-wins），无则保持上次值。
     if (parsed.locale !== undefined) clientUiLocale = parsed.locale;
+    // 整批丢弃必须可见（#17：客户端写了、宿主没动、日志一个字都没有）。
+    // 空载荷不走这条：那是消费后的正常态，每次都打就成了噪声。
+    const dropped = parsed.rejected;
+    if (dropped !== undefined) {
+      ctx.logger.warn(
+        `dsh-suggest-ghost: _ops batch dropped (${dropped.kind}, ${dropped.bytes} bytes): ${dropped.summary}`,
+      );
+    }
     const ops = parsed.ops;
     if (ops.length === 0) return;
     for (const op of ops) {
@@ -781,9 +796,13 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     if (changed > 0) ctx.logger.info(`dsh-suggest-ghost: hotness ops applied (${changed} changed)`);
     void persistence.flush();
     // 消费完成：清空操作队列（下一次 watch 触发时 ops 为空，直接跳过）。
+    // 清空失败也要留痕：失败意味着这份载荷**还留在盘上**，client 的写后读回会看到
+    // 它、下一次 document-updated 会把它当新载荷重放一遍（ops 幂等，但现象得能查）。
     void svc.update(SUGGEST_GHOST_NAMESPACE, { _ops: EMPTY_PUSH }).then(
-      () => { /* noop */ },
-      () => { /* noop */ },
+      () => { /* 清空成功是常态，不打日志 */ },
+      (error: unknown) => {
+        ctx.logger.warn(`dsh-suggest-ghost: _ops clear failed (ops will be re-read on next update): ${String(error)}`);
+      },
     );
   };
 

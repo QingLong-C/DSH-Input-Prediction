@@ -51,6 +51,18 @@ import {
   type InlineArmState,
 } from './inline-arm-policy.ts';
 import { keyCodeOf } from './keyspec.ts';
+/**
+ * 远程 `mutate` 兑现值的分类与写后判定（纯函数模块）。#16 的实质就落在「兑现 ≠ 落盘」
+ * 这一层判定上，所以它必须能离线驱动测试（`scripts/ops-write-verify-smoke.mjs`），
+ * 而不是等宿主重启后现场看日志。内核/远程层的取证清单写在 `settings-result.ts` 头注释。
+ */
+import {
+  isConflictRefusal,
+  readRejection,
+  settleWriteVerdict,
+  unwrapMutateResult,
+  verdictFromView,
+} from './settings-result.ts';
 import { SuggestGhostCard } from './settings-card.tsx';
 import type { PluginSettingsScope } from './settings-scope.ts';
 import type { LocaleFaceLike } from './useGhostT.ts';
@@ -116,9 +128,17 @@ interface RemoteLike {
      */
     describe(options?: { redactSecrets?: boolean }): Promise<unknown>;
     /**
-     * 写设置。**三个参数都必填**——少传 `expectedRevision` 会被 client api 拒绝：
-     * `settings/mutate expected 3 argument(s), got 2`（该参数是乐观并发控制，
-     * 传当前 revision；不匹配则整批失败，避免覆盖他人改动）。
+     * 写设置。第三个参数 `expectedRevision` 是乐观并发控制（不匹配则整批失败，
+     * 避免覆盖他人改动）：0.2.0-rc.2 的远程 schema 把它声明成
+     * `undefined | number`（`dsh-api-settings-controller/lib/typert.remote-client.js:67`），
+     * 但更早的代次因参数元数检查直接拒绝缺参（插件实测：
+     * `settings/mutate expected 3 argument(s), got 2`，见 `dsh-api-gateway/lib/client.js:1821-1823`），
+     * 故一律**显式传现值**，两种代次都安全。
+     *
+     * ⚠️ **兑现值不是「写成功」的凭证**：远程面把远程失败折进
+     * `{ ok: false, error }` 后**照样兑现**，只有装配故障才 reject（见下方
+     * `readMutateResult`）。成功时 `value` 是写后的 `SettingsNamespaceView`
+     * （带 `revision` 与整份 `value`），它就是现成的写后读回凭证。
      */
     mutate(ns: string, ops: readonly SettingsPathOpLike[], expectedRevision: number): Promise<unknown>;
   };
@@ -1104,7 +1124,13 @@ function applyBody(ctx: Context): void {
    *
    * 0.1.7 里 `settingsScope.set` 已随 settings.yaml 体系退役；改写 volatile
    * 配置字段走 `remote.settings.mutate(ns, [{op:'set', path:['_ops'], value}])`。
-   * mutate 失败（后端未就绪/命名空间暂不可见）时返回 false，调用方按未送达处理。
+   *
+   * **返回 true 的含义是「有证据表明载荷落进了文档」，不是「RPC 调用没抛错」**（#16）。
+   * 远程面把内核的冲突拒绝折成 `{ok:false, error}` 后照样兑现（见
+   * `unwrapMutateResult`），所以兑现状态本身没有信息量；`settleWrite` 拿写后视图的
+   * `revision` 推进 / `_ops` 值匹配当凭证。拿不到凭证、或远程明确拒绝时返回 false，
+   * 并各打一条 console.warn 区分「被拒」与「没落盘」——调用方按未送达处理（pull 有
+   * 退避重试兜着）。
    *
    * 每次写入自动捎带当前 UI 语言（`locale` 字段），host 据此做语言先验加成。
    */
@@ -1130,22 +1156,130 @@ function applyBody(ctx: Context): void {
     const doWrite = (attempt: number): Promise<boolean> =>
       svc
         .describe()
-        .then((described) => {
-          const list = unwrapSettingsDoc(described)?.namespaces ?? [];
-          const row = list.find((r) => r.ns === SETTINGS_NAMESPACE) as { revision?: number } | undefined;
-          const rev = typeof row?.revision === 'number' ? row.revision : 0;
-          return svc.mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['_ops'], value: enriched }], rev);
-        })
         .then(
-          () => { return true; },
+          (described) => {
+            const list = unwrapSettingsDoc(described)?.namespaces ?? [];
+            const row = list.find((r) => r.ns === SETTINGS_NAMESPACE) as { revision?: number } | undefined;
+            const rev = typeof row?.revision === 'number' ? row.revision : 0;
+            return svc
+              .mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['_ops'], value: enriched }], rev)
+              .then(
+                // 兑现 ≠ 落盘：远程面把冲突折成 `{ok:false,error}` 后照样兑现
+                // （见 unwrapMutateResult 的源码取证）。
+                (mutated: unknown) => settleWrite(mutated, rev, enriched, attempt),
+                // reject 只可能是装配故障（参数元数 / 方法未挂载 / 缺 Context 适配器）。
+                (error: unknown) => {
+                  const rejection = readRejection(error);
+                  if (attempt < 2 && isConflictRefusal(rejection.code, rejection.message)) {
+                    return doWrite(attempt + 1);
+                  }
+                  console.warn(`[suggest-ghost] _ops write rejected by client api: code=${String(rejection.code)}, message=${String(rejection.message)}`);
+                  return false;
+                },
+              );
+          },
+          // describe 自己失败（后端未就绪 / 连接断开）：**必须就地收住**。调用点是
+          // `void writeOps(...)`，让它 reject 出去就成了 unhandled rejection；改结构前
+          // 这一支由外层 onRejected 兜着，重构时很容易漏。
           (error: unknown) => {
-            // 版本冲突（host 自写 _push 会频繁推进 revision）：重取 revision 重试一次。
-            if (attempt < 2 && /conflict|revision/i.test(String(error))) {
-              return doWrite(attempt + 1);
-            }
+            console.warn(`[suggest-ghost] _ops write skipped: describe() failed, ${String(error)}`);
             return false;
           },
         );
+
+    /**
+     * 写后确认（#16 的闭环）。判定本身是纯函数（`settings-result.ts` 的
+     * `settleWriteVerdict`，可被 `scripts/ops-write-verify-smoke.mjs` 离线驱动），
+     * 这里只按结论接线：重试 / 留痕 / 兜底读回。
+     *
+     * 热路径成本：常规形态**零额外往返**——凭证就是 `mutate` 成功时带回的写后视图；
+     * 只有这一代的返回值认不出凭证时才补**一次** describe() 读回。没有轮询、没有定时器。
+     * 判据的依据（载荷仍在盘上 / revision 已动 / 两者皆无 = #16 签名）写在
+     * `settings-result.ts` 的 `verdictFromView` 里，那边有单测。
+     */
+    const settleWrite = (mutated: unknown, rev: number, sent: string, attempt: number): Promise<boolean> => {
+      const verdict = settleWriteVerdict(mutated, rev, sent);
+      switch (verdict) {
+        case 'landed':
+          return Promise.resolve(true);
+        case 'refused-conflict':
+          // 版本冲突（host 自写 `_push` 会频繁推进 revision）：重取 revision 重试。
+          // 注意：修复前这条分支**从来没触发过**——冲突当时被当成成功兑现了。
+          if (attempt < 2) return doWrite(attempt + 1);
+          return reportWrite(mutated, rev, 'conflict retries exhausted');
+        case 'refused-other':
+          return reportWrite(mutated, rev, verdict);
+        case 'unsettled':
+          return reportWrite(mutated, rev, verdict);
+        case 'unreadable':
+          // 这一代的返回值读不出凭证：补**一次** describe() 读回（不轮询、不排定时器，
+          // 0.2.x 的远程面带写后视图，常规形态根本走不到这里）。
+          return readBackOnce(rev, sent).then((settled) => {
+            if (settled === true) return Promise.resolve(true);
+            return reportWrite(mutated, rev, verdict);
+          });
+      }
+    };
+
+    /**
+     * 兜底的一次性读回：只服务 `unreadable` 这一分支（老代次/异常形态没带回可判别的
+     * 写后视图）。**一次**，不重试、不排定时器——热路径上常规形态根本走不到这里。
+     * @returns true = 拿到落盘证据；undefined = 读回也拿不到（交给调用方留痕）。
+     */
+    const readBackOnce = (rev: number, sent: string): Promise<boolean | undefined> =>
+      svc
+        .describe()
+        .then((described) => {
+          const row = (unwrapSettingsDoc(described)?.namespaces ?? []).find((r) => r.ns === SETTINGS_NAMESPACE);
+          const verdict = verdictFromView(row, rev, sent);
+          return verdict === 'landed' ? true : undefined;
+        })
+        .catch(() => { return undefined; });
+
+    /**
+     * 写没落地的留痕。**每条分支都至多一行，且只在失败路径上打**（成功静默），
+     * 所以它不会进 render/事件高频路径。区分开「被拒」「重试耗尽」「没落盘证据」
+     * 三种形态——#16 排查的第一步就是要分清「被拒」与「没到达内核」，
+     * 见 docs/internals-cordis-settings-pitfalls.md 陷阱 1「尚未闭环」段。
+     *
+     * 通道：浏览器侧没有可用的 ctx.logger（client fiber 的 ctx 是严格门控 Proxy，
+     * 未 inject 的属性读取直接抛），控制台是唯一落点，故用 console.warn——
+     * 它是失败路径专用，与 main 清理掉的 console.log 调试噪声不是一类。
+     */
+    const reportWrite = (mutated: unknown, rev: number, verdict: WriteVerdict | string): Promise<false> => {
+      const outcome = unwrapMutateResult(mutated);
+      const view = outcome.view;
+      console.warn(
+        `[suggest-ghost] _ops write ${String(verdict)}: expectedRevision=${rev}, `
+        + `code=${String(outcome.code)}, message=${String(outcome.message).slice(0, 120)}, `
+        + `revisionAfter=${String(view?.revision)}, _opsAfter=${JSON.stringify(view?.value).slice(0, 40)}`,
+      );
+      return Promise.resolve(false);
+    };
+
+    /** 兜底的一次性读回（仅用于「远程面没带回可判别的写后视图」这一少见分支）。 */
+    const readBackOnce = (rev: number, sent: string): Promise<boolean> =>
+      svc
+        .describe()
+        .then((described) => {
+          const row = (unwrapSettingsDoc(described)?.namespaces ?? []).find((r) => r.ns === SETTINGS_NAMESPACE) as
+            | { revision?: number; value?: Record<string, unknown> }
+            | undefined;
+          if (row?.value?._ops === sent) return true;
+          // 同 settleWrite 判据 2：取「动了」而不是「变大了」，host 重启会让计数回 0。
+          return typeof row?.revision === 'number' && row.revision !== rev;
+        })
+        .catch(() => false);
+
+    /** 「写了但拿不到落盘证据」的留痕：区分「被拒」与「没到达内核」（#16 的第一步）。 */
+    const reportUnsettled = (rev: number, after?: number, landedValue?: unknown): Promise<false> => {
+      console.warn(
+        `[suggest-ghost] _ops write unsettled: expectedRevision=${rev}, `
+        + `revisionAfter=${String(after)}, _opsAfter=${String(landedValue).slice(0, 48)}`,
+      );
+      return Promise.resolve(false);
+    };
+
     return doWrite(0);
   };
   /** 停顿续写的计时器句柄（`arm`/`reset` 建立，`skip` 绝不清动）。 */

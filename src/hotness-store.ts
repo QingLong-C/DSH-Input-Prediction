@@ -242,28 +242,154 @@ const opsPayloadSchema = z.object({
   locale: z.string().optional(),
 });
 
-/** `_ops` 解析结果：操作批 + 可选的 UI 语言。 */
+/**
+ * `_ops` 载荷被丢弃的原因（`parseHotnessOps` 的留痕载荷）。
+ *
+ * **为什么用返回值而不是日志回调**：`parseHotnessOps` 是纯函数（无 ctx、无 I/O），
+ * 它跑在 host 的 settings 事件回调里，也在 smoke 里被直接驱动。留痕走两条完全不同的
+ * 通道（host 要 `ctx.logger.warn`、smoke 要断言「未知 op 被拒且有留痕」），所以这里
+ * 把**原因作为数据返回**，由调用方决定怎么落地：
+ *  - `index.ts` 的 `consumeOps` 统一打印（两个调用点共用同一个消费者，漏打印的可能
+ *    性只存在于一个函数里，新增第三个调用点也自动带上留痕）；
+ *  - `scripts/ops-schema-coverage-smoke.mjs` 直接断言这个字段。
+ * 传回调（`onReject`）也能work，但它把「打什么级别」这个决策塞进了纯函数，且 smoke
+ * 要造假 ctx 才能观察；返回数据两者都不付。
+ */
+export interface OpsRejectInfo {
+  /** `json` = 载荷不是合法 JSON；`schema` = JSON 合法但被 `opsPayloadSchema` 整批拒绝。 */
+  readonly kind: 'json' | 'schema';
+  /** 可直接进日志的单行摘要（已截断，含 zod issues——#17 的直接教训）。 */
+  readonly summary: string;
+  /** 载荷字节数（判断是不是被截断/塞了巨载荷；不含正文，避免把用户草稿抄进日志）。 */
+  readonly bytes: number;
+}
+
+/**
+ * schema 侧实际放行的 op 变体清单（`hotnessSchemaVariants` 的返回元素）。
+ */
+export interface OpsSchemaVariant {
+  /** 判别式字面量（`op` 的取值）。 */
+  readonly op: string;
+  /** 必填的其余字段名（不含 `op`）。 */
+  readonly required: readonly string[];
+  /** 可选的其余字段名。 */
+  readonly optional: readonly string[];
+}
+
+/**
+ * 从 `opsPayloadSchema` **现推导**「schema 这一侧认得哪些 op 变体、各自要求哪些字段」。
+ *
+ * 存在的唯一理由：#17 是「`domain.ts` 的 TS 类型有 `complete`、schema 没有」这种
+ * 两份真相互不约束的漂移，而编译器不会报错。漂移断言（`scripts/ops-schema-coverage-smoke.mjs`）
+ * 要拿这一侧的清单去和 TS 那一侧比，所以这份清单**必须**从真正在跑的 schema 推导，
+ * 不能手抄——手抄的名单自己就会变成第三份会漂移的真相。
+ *
+ * 推导失败（zod 换大版本、`discriminatedUnion` 内部形状变了）时**直接抛**：
+ * 静默返回空数组会让漂移断言「全都对」，那比没有断言更坏。
+ */
+export function hotnessSchemaVariants(): readonly OpsSchemaVariant[] {
+  const opsNode = (opsPayloadSchema.shape as Record<string, unknown>).ops as
+    | { element?: { options?: unknown } }
+    | undefined;
+  const options = opsNode?.element?.options;
+  if (!Array.isArray(options)) {
+    throw new Error('dsh-suggest-ghost: cannot introspect opsPayloadSchema (zod internal shape changed?)');
+  }
+  return options.map((option) => {
+    const shape = (option as { shape?: Record<string, unknown> }).shape;
+    if (shape === undefined) {
+      throw new Error('dsh-suggest-ghost: opsPayloadSchema option has no .shape (zod internal shape changed?)');
+    }
+    // zod v4：`z.literal('x')` 的判别值在公开访问器 `.value` 上，内部 `def.values` 是数组。
+    // 两种都认，是为了让这个「推导」本身不因 zod 小版本换内部形状而静默给出错的名单。
+    const opNode = shape.op as { value?: unknown; def?: { type?: string; values?: readonly unknown[] } } | undefined;
+    const kind = opNode?.def?.type;
+    const op = kind === 'literal'
+      ? (typeof opNode?.value === 'string' ? opNode.value : opNode?.def?.values?.[0])
+      : undefined;
+    if (typeof op !== 'string') {
+      throw new Error('dsh-suggest-ghost: opsPayloadSchema option has no literal `op` discriminator');
+    }
+    const required: string[] = [];
+    const optional: string[] = [];
+    for (const [key, child] of Object.entries(shape)) {
+      if (key === 'op') continue;
+      const kind = (child as { def?: { type?: string } }).def?.type;
+      if (kind === 'optional' || kind === 'default') optional.push(key);
+      else required.push(key);
+    }
+    return { op, required, optional };
+  });
+}
+
+/** `_ops` 解析结果：操作批 + 可选的 UI 语言 + 可选的丢弃原因。 */
 export interface ParsedOpsResult {
   readonly ops: readonly HotnessOp[];
   readonly locale?: string;
+  /** 有值 = 这份载荷被整批丢弃了，**调用方必须留痕**（空载荷不算，见下）。 */
+  readonly rejected?: OpsRejectInfo;
+}
+
+/** 日志摘要里保留的 zod issues 条数上限（再多也没法看）。 */
+const ISSUE_SUMMARY_MAX = 4;
+
+/** 把 zod issues 收成一行摘要：`path:code(message)`。 */
+function summarizeIssues(issues: readonly { path: readonly (string | number | symbol)[]; code: string; message: string }[]): string {
+  return issues
+    .slice(0, ISSUE_SUMMARY_MAX)
+    .map((issue) => `${issue.path.map(String).join('.') || '<root>'}: ${issue.code} (${issue.message})`)
+    .join('; ')
+    + (issues.length > ISSUE_SUMMARY_MAX ? `; …${issues.length - ISSUE_SUMMARY_MAX} more` : '');
+}
+
+/** 截断成单行日志片段（压掉换行，避免多行载荷污染日志）。 */
+function headOf(raw: string, limit: number): string {
+  const flat = raw.replace(/\s+/g, ' ').trim();
+  return flat.length > limit ? `${flat.slice(0, limit)}…` : flat;
 }
 
 /**
  * 解析 client 写入 `_ops` 的 JSON 载荷：非法/空载荷返回空结果（调用方据此
  * 跳过消费）。上限防御：单批操作数最多 1000（防畸形巨载荷拖住写链）。
+ *
+ * **三条返回空 ops 的路径语义不同，留痕也不同**（Gitea #17 的教训：载荷被整批
+ * 拒了却毫无线索）：
+ *  1. 空载荷（`undefined` / `''` / `'null'`）：**正常态**，不是丢弃。host 每次消费
+ *     完都把 `_ops` 写回空值，`document-updated` 必然再读到它，所以这里不打日志
+ *     （打了就是每次推送一条噪声）。
+ *  2. JSON 解析失败 → `rejected.kind = 'json'`，必须留痕。
+ *  3. zod 拒绝 → `rejected.kind = 'schema'`，必须留痕并带 issues 摘要（整批丢弃的
+ *     原因只有 issues 能说清）。
+ * 2/3 由调用方（`index.ts` 的 `consumeOps`）经 `ctx.logger.warn` 打印——不用
+ * console.log：main 的 `6dfcd78`（chore: remove all debug console.log statements）
+ * 正是把 console 当调试噪声清掉的那次；走 logger 的留痕不会被下一轮清理顺手删。
  */
 export function parseHotnessOps(raw: string | undefined): ParsedOpsResult {
   if (typeof raw !== 'string' || raw === '' || raw === EMPTY_OPS) return { ops: [] };
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch {
-    return { ops: [] };
+  } catch (error) {
+    return {
+      ops: [],
+      rejected: {
+        kind: 'json',
+        summary: `JSON.parse failed: ${String(error instanceof Error ? error.message : error)}; head=${headOf(raw, 120)}`,
+        bytes: raw.length,
+      },
+    };
   }
   const result = opsPayloadSchema.safeParse(parsed);
   if (!result.success) {
-    // 静默丢弃会让「客户端写了、宿主没动」彻底不可诊断——必须留痕。
-    return { ops: [] };
+    // 静默丢弃会让「客户端写了、宿主没动」彻底不可诊断——必须留痕（见上面第 3 条）。
+    return {
+      ops: [],
+      rejected: {
+        kind: 'schema',
+        summary: `opsPayloadSchema rejected the batch: ${summarizeIssues(result.error.issues)}`,
+        bytes: raw.length,
+      },
+    };
   }
   return {
     ops: result.data.ops.slice(0, 1000),
