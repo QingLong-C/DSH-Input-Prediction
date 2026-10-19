@@ -53,7 +53,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && node build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:smoke": "node --experimental-strip-types scripts/history-smoke.mjs && node --experimental-strip-types scripts/sanitize-smoke.mjs && node --experimental-strip-types scripts/hotness-persist-smoke.mjs && node --experimental-strip-types scripts/coldstart-smoke.mjs && node scripts/inline-smoke.mjs && node scripts/ghost-geom-smoke.mjs",
+    "test:smoke": "node --experimental-strip-types scripts/history-smoke.mjs && node --experimental-strip-types scripts/sanitize-smoke.mjs && node --experimental-strip-types scripts/hotness-persist-smoke.mjs && node --experimental-strip-types scripts/coldstart-smoke.mjs && node scripts/inline-smoke.mjs && node scripts/ghost-geom-smoke.mjs && node scripts/accept-cas-smoke.mjs && node scripts/render-storm-smoke.mjs && node scripts/live-settings-smoke.mjs",
     "test:e2e": "pnpm build && node scripts/hotness-persist-e2e.mjs && node scripts/coldstart-e2e.mjs",
     "preview": "node scripts/preview-card.mjs",
     "replay": "node --experimental-strip-types scripts/replay-history.mjs"

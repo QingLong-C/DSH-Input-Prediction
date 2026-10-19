@@ -19,6 +19,30 @@ All notable changes to this project will be documented in this file.
   宿主现在全局追踪 `lastCompletion {sessionId, completion}`，并在目标会话缓存未命中时持续捎带最近一次续写；
   跨会话误显示由客户端既有的 `completionSessionId` + `draft` 全等双校验兜住（#18，`bceac31`）。
   **运行时验证未完成**：需要重启宿主后观察续写显示，本条目只记录代码已合入
+- **采纳建议会吞掉用户刚打的字**（#4，`3a06a6b`）：Tab 整条采纳与 `→` 逐词采纳都是
+  「读草稿快照 → 拼 `accepted` → `setDraft`」，两步之间没有任何校验。原生输入先于 React 渲染
+  到达宿主草稿存储，所以用户在这两步之内打的字会被整段覆盖。现在以 `ghostContent()` 同一帧
+  读出的 `{draft, draftRev}` 为 CAS 基线，写入前重读比对：宿主 `InputState.draftRev`
+  （`@deepseek-ai/dsh-client-ui-conversation@0.2.0-rc.2`，实测仅在草稿投影内容变化时 +1，
+  **纯光标移动不推进**，故不会因挪动光标而误放弃）不等或文本不等，就一个字符都不写、幽灵照旧
+  收掉。判据与 `accepted` 构造抽在 `src/client/accept-guard.ts`，两条路径共用；历史补全的斜杠
+  命令整行还原逐字搬入，并由 `scripts/accept-cas-smoke.mjs` 用旧实现作回归预言逐字符比对
+- **一次输入刷出上千次 armed，停顿计时器永远被推倒重来**（#21，`580e76f`）：旧
+  `scheduleInlineTrigger()` 首行就 `clearInlineTimer()`，而每个 `render()` 都调它 —— debounce
+  度量的其实是「距上次 render」。判据改为纯函数状态机 `decideInlineArm`（观察值 = 草稿/会话/
+  幽灵形态/开关/组词），同一观察的重复送达一次都不清表；到期时刻按绝对 `dueAt` 结算，回到
+  「最后一次按键 + 800ms」的真实停顿点。顺带修掉一条真实的退订泄漏：`resolve()` 也会被 render
+  调用并就地换掉 `bound`（会话晚就绪），旧会话的三条 store 订阅此前一直挂到下次真切换才清，
+  现在退订/订阅收敛到 `subscribeBound` 单一出口。虚拟时钟对照：armed 行数 1999 → 37、
+  `setTimeout` 调用 1999 → 37、complete op 触发时刻 24780ms → 4700ms
+  （`scripts/render-storm-smoke.mjs`）。**浏览器内的实测归因仍未做**：三个来源各自的事件数
+  搭在 `inline armed` 行里打印，留给下次运行时观察
+- **设置页改开关在运行中不生效**（#19 遗留，`95994d6`）：`liveSettings = flattenConfig(resolved)`
+  与 `effective()` 的两个入参同源，读的都是 `apply(ctx, config)` 首次解析并 `deepFreeze` 的时刻
+  快照，内核重解析永不回填。新增 `src/live-settings.ts` 做「事件驱动标脏 + 下一次读才
+  `describe()` + 5s TTL 兜底」的实时读源，`bootSettings` 降级为默认层，实时覆盖值按
+  `keyof FlatConfig` 键表逐键取（`_ops`/`_push` 在类型层就落不进设置）。**需宿主重启后按
+  issue #19 的验收清单确认**
 
 ### 文档
 
@@ -31,11 +55,23 @@ All notable changes to this project will be documented in this file.
 
 ### 已知缺口
 
-- #17 同时要求「schema 拒绝路径必须留痕」，那行日志（`parseHotnessOps` 打印 issues 摘要）已随 main 的
+- #17 要求「schema 拒绝路径必须留痕」，那行日志（`parseHotnessOps` 打印 issues 摘要）已随 main 的
   `6dfcd78`（chore: remove all debug console.log statements）一并删除；`parseHotnessOps` 现在三条返回空
-  ops 的路径全部静默。#16 的冲突/失败日志同批被删（重试逻辑本身保留）
-- #16 的写后读回校验仍缺：`writeOps` 成功兑现不等于值已落盘（对比设置卡片路径写入后会 `readValue()`）
-- #19 遗留未修：用户可调项仍从被捕获的 `resolved` 读取，也就是会冻结的 volatile 引用（另分支处理）
+  ops 的路径全部静默，而 :265 的注释还写着「必须留痕」。**留痕改走 `ctx.logger.warn` 正在处理**
+  （分支 `fix/issue-16-17-writeback`），console.log 会被下一轮清理当成调试噪声删掉
+- #16 的写后读回校验仍缺：`writeOps` 成功兑现不等于值已落盘（对比设置卡片路径写入后会 `readValue()`）；
+  冲突判定也还是 `/conflict|revision/i` 文本匹配，未改用内核的 `error.code === 'SETTINGS_CONFLICT'`
+  （`@deepseek-ai/dsh-settings/lib/index.js:511`）。同分支处理中
+- 没有任何断言保证 `opsPayloadSchema` 覆盖 `HotnessOp` 的全部变体——#17 那类「类型有、schema 没有」的
+  漂移只能靠一条遍历变体的冒烟挡住。同分支处理中
+- #4 的残余窗口：宿主把编辑器提交批处理在 store 发布之前时，`draft` 与 `draftRev` 会**一起**是旧值，
+  内容/版本比对都看不出漂移。真正闭合要宿主把原子插入 verbs（`captureInsertion()` + `insertText(text, span)`）
+  交到插件手上，本插件用的是「校验后 `setDraft`」
+- #21 的运行时归因未做：1127 次 render 到底来自哪条订阅，只有浏览器里能看到（`inline armed` 行的
+  `renders{session,input,face,other}` 计数）；`remote.$on('settings/document-updated')` 是否真把
+  `(ns, revision)` 透传到客户端也待确认——载荷不带 ns 时代码退化成「不过滤」
+- `GhostPushPayload`（`src/settings.ts`）从未被用作类型约束，只在注释里出现，是第二份会漂移的真相；
+  宿主写的 `error` 字段客户端解析结构里没有（写了没人读）
 
 ## [0.5.0] - 2026-10-10
 

@@ -10,7 +10,9 @@
 ## 怎么读这份文档
 
 行号与 diff 的核对基线是分支 `fix/issue-16-18-cleanup` 的提交 `1eb708d`。main 之后
-删过诊断日志，行号有偏移，按符号名定位比按行号可靠。
+删过诊断日志，行号有偏移，按符号名定位比按行号可靠。本文随集成分支
+`integrate/issues-2026-10` 前进时只更新下面的「现状」段落，不重排全文行号；若你在
+别的分支上读到行号对不上，先按符号名找。
 
 | 标记 | 含义 |
 |---|---|
@@ -193,10 +195,18 @@ reject（远程代理、typert 传输还是 `.then` 写法）。因此下面两�
 **现状要分清**：
 
 - `_ops` 已按 `describe()` 读（已修，`git show 8d5918e`）。
-- 用户可调项**没有**改完：事件回调里的 `liveSettings = flattenConfig(resolved)`
-  （`src/index.ts:338`）和 `effective()`（`src/index.ts:353`）读的都是被捕获的
-  `resolved`，也就是上面那份会冻结的引用。这条是 #19 的遗留，由另一分支处理，
-  本仓库现状仍是「设置页改了，运行中不一定生效」。
+- 用户可调项**已改完（代码层，待宿主验证）**：`liveSettings` 不再是被捕获的
+  `flattenConfig(resolved)`，而是 `createLiveSettings()` 读源（`src/live-settings.ts`，
+  提交 `95994d6`，集成为 `df09953`）。要点是三条：`effective()` 读
+  `liveSettings.snapshot(bootSettings)`，`bootSettings` 降级为**默认层**；
+  `settings/document-updated` 命中本 ns 时 `invalidate()` 标脏、**下一次读**才
+  `describe()`；实时覆盖值按 `Record<keyof FlatConfig, FieldSpec>` 键表逐键取，
+  `_ops`/`_push` 不是 `FlatConfig` 的键，**类型层就落不进设置**。
+  「设置页改了不生效」是否真的消除，需宿主重启后按 issue #19 的验收清单确认。
+- 同一次改动还带来一个**新的读路径成本**：`describe()` 在内核里会按 raw 变化
+  `emit('settings/document-updated')`（`@deepseek-ai/dsh-settings/lib/index.js:435`），
+  所以「读 → 事件 → 再读」理论上能自喂。本插件的对策是事件只标脏、不立刻读，
+  并加了 5s TTL 兜底与重入保护；引用这条前先确认这两个机制还在。
 
 `dsh-settings` 的 README 把 reference 生命周期与通知推给
 `vendor/loader/README.md`（`@deepseek-ai/dsh-settings/README.md:57`），那份文档在本机
