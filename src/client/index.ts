@@ -42,6 +42,14 @@ import {
   type DraftSnapshot,
 } from './accept-guard.ts';
 import { nextAcceptChunk } from './chunk.ts';
+import {
+  configValuesEqual,
+  decideInlineArm,
+  initialInlineArmState,
+  settleInlineTimer,
+  type InlineArmGhostKind,
+  type InlineArmState,
+} from './inline-arm-policy.ts';
 import { keyCodeOf } from './keyspec.ts';
 import { SuggestGhostCard } from './settings-card.tsx';
 import type { PluginSettingsScope } from './settings-scope.ts';
@@ -885,6 +893,9 @@ function applyBody(ctx: Context): void {
       input: input as unknown as InputFaceLike,
       projectionFace: session.projections.faceOf(PROJECTION_KEY),
     };
+    // 换绑即刻重订阅：`unsubs` 归渲染 effect 所有，这里通过钩子回调，避免旧会话的
+    // 三条 store 订阅在「由 render 触发的换绑」上长期滞留（详见 resubscribeBound）。
+    resubscribeBound?.();
     // 绑定成功即拉取该会话的权威状态（历史环 + 建议）：这是「会话就绪」的
     // 唯一出口，冷启动、切会话、会话晚就绪三条路径在这里汇合成一次请求，
     // 不再依赖 effect 初始化的那一拍（那时会话常常尚未就绪，请求会落空）。
@@ -1021,12 +1032,16 @@ function applyBody(ctx: Context): void {
   const render = (): void => {
     const currentId = currentSessionIdOf(sessions.list.getSnapshot());
     resolve(currentId);
-    // 停顿续写调度：草稿每次变化都重置定时器（debounce），停满
-    // inlineDelayMs 才真正发送 complete op。
-    scheduleInlineTrigger();
-    retryPendingPull();
+    // 幽灵内容先于续写调度计算：调度策略需要「当前幽灵形态」作为入参（`inline`
+    // 意味着这份草稿的续写已经显示在屏幕上，不必再问一次）。ghostContent() 是
+    // 纯读取 + 结果缓存，挪到前面没有副作用，也让下面的分支复用同一份结果。
     const { content, key, base } = ghostContent(currentId);
+    // 停顿续写调度：判据是「草稿/会话/形态/配置有没有变」，不是 render 次数
+    // （debounce 语义见 scheduleInlineTrigger 与 inline-arm-policy.ts）。
+    scheduleInlineTrigger(currentId, content === null ? null : content.kind);
+    retryPendingPull();
     // base 与 content 同源：content 非 null 时 base 必非 null（同一帧快照读出）。
+    // base 是采纳写入的 CAS 基线（#4），拿不到就不出幽灵。
     if (content === null || base === null) {
       if (shown !== null) {
         overlay.hide();
@@ -1133,11 +1148,7 @@ function applyBody(ctx: Context): void {
         );
     return doWrite(0);
   };
-  /**
-   * 停顿续写调度：草稿非空且达到阈值时，停止输入 inlineDelayMs 后向 host 发送
-   * `complete` op（携带当时草稿），host 生成续写并经 `_push` 推回 completion。
-   * 每次按键重置定时器（debounce）；到期时再校验草稿仍达阈值才发送。
-   */
+  /** 停顿续写的计时器句柄（`arm`/`reset` 建立，`skip` 绝不清动）。 */
   let inlineTriggerTimer: ReturnType<typeof setTimeout> | null = null;
   const clearInlineTimer = (): void => {
     if (inlineTriggerTimer !== null) {
@@ -1145,24 +1156,107 @@ function applyBody(ctx: Context): void {
       inlineTriggerTimer = null;
     }
   };
-  const scheduleInlineTrigger = (): void => {
+  /** armed 策略状态（纯函数状态机的当前值，见 inline-arm-policy.ts）。 */
+  let armState: InlineArmState = initialInlineArmState();
+  /** 上一次打印过的 skip 形态；只在形态变化时打印，避免既有的 skip 诊断跟着风暴刷。 */
+  let lastSkipReason: string | null = null;
+  /**
+   * #21 待查项 1 的定位探针：按**来源**统计 render 被调用的次数。
+   *
+   * 风暴的直接成因已确认是「每个来源都调 render × 每次 render 都重置计时器」，前半句
+   * 到底是哪个来源在刷还需要运行时计数才能定论，故这里按来源分别累加，只在 armed 那一行
+   * 汇总打印（armed 现在每份草稿至多一次，不会刷屏）。`other` = 错峰补渲染 / 会话列表 /
+   * 设置事件 / IME 组合等零散来源。
+   */
+  const renderHits = { session: 0, input: 0, face: 0, other: 0 };
+  /** 计一次来源并渲染（所有 render 调用都走这里，armed 日志据此归因）。 */
+  const renderTraced = (source: keyof typeof renderHits): void => {
+    renderHits[source] += 1;
+    render();
+  };
+  /**
+   * `bound` 换绑之后的重订阅钩子，由渲染 effect 注入（effect 卸载时置回 null）。
+   *
+   * #21 待查项 1 的**订阅泄漏点**：`resolve()` 也会被 `render()` 调用，而它能就地
+   * 把 `bound` 换成另一条会话（晚就绪的会话走的正是这条路，见 resolve 末尾注释）。
+   * 三个 store 订阅句柄存在 effect 的局部变量里，只有 `rebind()` 会退订它们；于是
+   * 经由 render 换绑时，**旧会话的那三条订阅一直挂着**（旧会话若仍在跑，它每推一次
+   * 快照就多打一次 render），直到下一次真正的会话切换才被顺手清掉。换绑即重订阅。
+   */
+  let resubscribeBound: (() => void) | null = null;
+
+  /**
+   * 停顿续写调度：草稿非空且达到阈值时，停止输入 inlineDelayMs 后向 host 发送
+   * `complete` op（携带当时草稿），host 生成续写并经 `_push` 推回 completion。
+   *
+   * **0.5.2 起 debounce 的判据从「render 次数」换成「观察值变化」**（issue #21）：
+   * 本函数由 `render()` 首行调用，而 render 的来源远不止按键（三个 store 订阅、
+   * 会话列表、设置事件、错峰补渲染……）。旧实现每次都 `clearTimeout` + 重新
+   * `setTimeout`，等价于「距上一次 render 多久」，于是一次 40 字符输入实测打出
+   * 1127 次 armed，停顿计时器被永远推倒重来。现在「该不该重新计时」全部交给纯函数
+   * {@link decideInlineArm}（见 inline-arm-policy.ts），本处只执行它的决策：
+   * `skip` 完全不动计时器（到期时刻保持不变）、`cancel` 清表不重排、`arm`/`reset`
+   * 才真的建定时器。
+   *
+   * @param currentId - 本次 render 认定的当前会话 id（无 bound 时策略视为未绑定）。
+   * @param ghostKind - 本次 render 算出的幽灵形态；`inline` 表示该草稿的续写已在
+   *                    屏幕上，没有再问一次的必要（也是写→推→render→再写的回环出口）。
+   */
+  const scheduleInlineTrigger = (currentId: string | undefined, ghostKind: InlineArmGhostKind): void => {
+    const sessionId = bound === null ? null : currentId ?? null;
+    const obs = {
+      now: Date.now(),
+      draft: bound === null ? '' : bound.input.state.getSnapshot().draft,
+      sessionId,
+      ghostKind,
+      enabled: settings.inlineEnabled,
+      minChars: settings.inlineMinChars,
+      delayMs: settings.inlineDelayMs,
+      composing,
+    };
+    const outcome = decideInlineArm(armState, obs);
+    armState = outcome.state;
+    const { decision } = outcome;
+    if (decision.action === 'skip') return; // 同一次观察的重复送达：计时器一律不动
     clearInlineTimer();
-    if (!settings.inlineEnabled || bound === null) {
+    // 旧实现在这里的四道串行早退（开关/绑定/阈值/会话）已全部下沉为
+    // decideInlineArm 的 cancel 理由，由策略统一判定（#21）。
+    if (decision.action === 'cancel') {
+      // 不合格形态（开关关闭 / 无会话 / 未达阈值 / 组词中 / 已有续写）：清表不重排。
+      // 两条既有的 `inline skip` 诊断保留，但**只在形态变化时**打印：它们在风暴里会
+      // 长期成立，逐次记录就又变成 #21 的那 1127 行。`below-min-chars` 等旧实现本就静默，
+      // 继续静默。
+      if (decision.reason === 'disabled' || decision.reason === 'no-session') {
+        if (lastSkipReason !== decision.reason) {
+          if (decision.reason === 'disabled') {
+            console.log(`[suggest-ghost] inline skip: enabled=${settings.inlineEnabled}, bound=${bound !== null}`);
+          } else {
+            console.log('[suggest-ghost] inline skip: no current session id');
+          }
+          lastSkipReason = decision.reason;
+        }
+      } else {
+        lastSkipReason = null;
+      }
       return;
     }
-    const draft = bound.input.state.getSnapshot().draft;
-    if (draft.trim().length < settings.inlineMinChars) return;
-    const currentId = currentSessionIdOf(sessions.list.getSnapshot());
-    if (currentId === undefined) {
-      return;
-    }
+    lastSkipReason = null;
+    const armedSessionId = decision.sessionId as string;
+    console.log(`[suggest-ghost] inline armed: delay=${decision.delayMs}, draft=${JSON.stringify(decision.draft.slice(0, 26))}, session=${armedSessionId}, reason=${decision.reason}, suppressed=${armState.suppressed}, renders{session=${renderHits.session},input=${renderHits.input},face=${renderHits.face},other=${renderHits.other}}`);
     inlineTriggerTimer = setTimeout(() => {
       inlineTriggerTimer = null;
-      // 再次校验：定时器到期时草稿可能已变（被 render 重置了 timer 但 draft 也变了）。
+      // 到期时再校验一次：草稿可能在 armed 之后被别的路径改掉（改掉会另起一张表，
+      // 这张表随之被清掉，所以走到这里通常仍是同一份草稿）。
       const draftNow = bound?.input.state.getSnapshot().draft ?? '';
-      if (draftNow.trim().length < settings.inlineMinChars) return;
-      writeOps(JSON.stringify({ rev: 0, ops: [{ op: 'complete', sessionId: currentId, draft: draftNow }] }));
-    }, settings.inlineDelayMs);
+      if (bound === null || draftNow.trim().length < settings.inlineMinChars) {
+        // 没发出去 → 不记去重键，草稿之后的变化仍可重新计时。
+        armState = settleInlineTimer(armState, null);
+        return;
+      }
+      armState = settleInlineTimer(armState, { sessionId: armedSessionId, draft: draftNow });
+      console.log('[suggest-ghost] inline trigger FIRED: sending complete op');
+      writeOps(JSON.stringify({ rev: 0, ops: [{ op: 'complete', sessionId: armedSessionId, draft: draftNow }] }));
+    }, Math.max(0, decision.dueAt! - obs.now));
   };
   let pullRev = 0;
   let lastPulledSessionId: string | undefined;
@@ -1260,11 +1354,6 @@ function applyBody(ctx: Context): void {
           const rev = typeof entry.revision === 'number' ? entry.revision : 0;
           if (rev === lastRevision) return;
           lastRevision = rev;
-          // settings 实际变更 → 失效所有归一化/打分缓存，避免返回陈旧结果。
-          settingsEpoch++;
-          clearNormalizeCache();
-          hotCountsCache = null;
-          ghostContentCache = null;
           const v = (entry.value ?? {}) as Record<string, unknown>;
           let pushed: {
             suggestion?: unknown;
@@ -1282,7 +1371,7 @@ function applyBody(ctx: Context): void {
               pushed = null;
             }
           }
-          settings = {
+          const next: typeof settings = {
             historyEnabled: typeof v.historyEnabled === 'boolean' ? v.historyEnabled : true,
             historyCrossSession: typeof v.historyCrossSession === 'boolean' ? v.historyCrossSession : false,
             historyMaxEntries: typeof v.historyMaxEntries === 'number' ? v.historyMaxEntries : 50,
@@ -1316,6 +1405,19 @@ function applyBody(ctx: Context): void {
               ? settings.completionSessionId
               : (typeof pushed.completionSessionId === 'string' ? pushed.completionSessionId : null),
           };
+          // **值未变则整条链路止步**（#21 待查项 2 的读侧放大）：内核事件只带
+          // `(ns, revision)`，revision 推进不代表本插件关心的东西变了——host 每分钟
+          // 数十次的 `_push` 里大部分字段常年不变，而旧代码无条件替换 `settings` 对象
+          // 引用，于是 settingsEpoch++ → 归一化/打分/幽灵三处缓存全废 → render() →
+          // 又一次 armed。深比较用 configValuesEqual（先比引用再递归，`history` 省略时
+          // 保留的就是同一个数组引用，一次比较即命中）。
+          if (configValuesEqual(next, settings)) return;
+          // settings 实际变更 → 失效所有归一化/打分缓存，避免返回陈旧结果。
+          settingsEpoch++;
+          clearNormalizeCache();
+          hotCountsCache = null;
+          ghostContentCache = null;
+          settings = next;
           // 收到 host 新鲜数据后立即持久化，下次冷启动可立即恢复。
           saveToCache({
             hot: settings.hot,
@@ -1324,7 +1426,7 @@ function applyBody(ctx: Context): void {
             suggestion: settings.suggestion,
             suggestionSessionId: settings.suggestionSessionId,
           });
-          render();
+          renderTraced('other');
         } catch {
           // describe 失败（网络抖动/后端未就绪）时保留现值，等下一个事件或重连。
         } finally {
@@ -1332,9 +1434,24 @@ function applyBody(ctx: Context): void {
         }
       })();
     };
-    // 首读一次（事件只推增量），此后由内核转发的事件驱动——无轮询。
+    // 首读一次（事件只推增量），此后由内核的事件驱动——无轮询。
     // `connection/reset` 后需重新首读：那之前的订阅与缓存都可能已失效。
-    const offUpdated = remote.$on?.('settings/document-updated', () => applySettings());
+    //
+    // **按命名空间过滤**（#21 待查项 2）。内核事件签名是
+    // `settings/document-updated(ns, revision)`，任何插件条目自己的表单值/schema/页面
+    // 策略变化都会广播这一条；旧 handler 忽略入参，于是别的命名空间每写一次，本插件
+    // 就多一次 describe 往返。这不只是浪费：内核的 `describe()` 自身会在 raw 发生变化的
+    // 条目上 emit 本事件（@deepseek-ai/dsh-settings `lib/index.js` 的 describe 体内
+    // `emit("settings/document-updated", …)`，同文件 `write()` 又反过来调 `describe()`），
+    // 即「一次读可能再喂出一条事件」。读↔事件互相喂火的环要靠这个闸口切断。
+    // 载荷不带 ns 的宿主（签名变化/远端信封剥掉了参数）退化成原样处理，由下游的
+    // revision 相等早退 + 值深比较兜底，不会因此漏更新。
+    const onDocumentUpdated = (...args: unknown[]): void => {
+      const ns = typeof args[0] === 'string' ? args[0] : undefined;
+      if (ns !== undefined && ns !== SETTINGS_NAMESPACE) return;
+      applySettings();
+    };
+    const offUpdated = remote.$on?.('settings/document-updated', onDocumentUpdated);
     const offReset = ctx.on('connection/reset', () => applySettings());
     ctx.effect(() => () => {
       offUpdated?.();
@@ -1440,41 +1557,58 @@ function applyBody(ctx: Context): void {
       // React 提交会话视图晚于 list store 更新：rebind 时 composer 可能尚未
       // 挂载，show() 会找不到编辑器；错峰补渲染覆盖这个竞态（幽灵显示后
       // 幂等，重复渲染无副作用）。
-      deferredRenders = [60, 300, 900].map((ms) => setTimeout(render, ms));
+      deferredRenders = [60, 300, 900].map((ms) => setTimeout(() => renderTraced('other'), ms));
     };
-    const rebind = (knownId?: string | undefined): void => {
+    /**
+     * 退订当前 `bound` 的三条 store 订阅并按当前 `bound` 重新订阅。
+     *
+     * 单一出口：`rebind()` 与 `resolve()` 的换绑路径都走这里，`unsubs` 因此始终与
+     * `bound` 一一对应（旧实现里 resolve 换绑不重订阅，旧会话订阅会一直挂着）。
+     */
+    const subscribeBound = (): void => {
       for (const un of unsubs) un();
       unsubs = [];
-      resolve(knownId ?? currentSessionIdOf(sessions.list.getSnapshot()));
-      if (bound !== null) {
-        unsubs.push(
-          bound.session.subscribe(render),
-          bound.input.state.subscribe(render),
-          bound.projectionFace.subscribe(render),
-        );
+      if (bound === null) return;
+      unsubs.push(
+        bound.session.subscribe(() => renderTraced('session')),
+        bound.input.state.subscribe(() => renderTraced('input')),
+        bound.projectionFace.subscribe(() => renderTraced('face')),
+      );
+    };
+    const rebind = (knownId?: string | undefined): void => {
+      // 先摘钩子：resolve() 换绑时它本会重订阅，而下面无条件再调一次，两次会
+      // 「订完立刻退」空转一遍；这里由 rebind 独占重订阅。
+      const hook = resubscribeBound;
+      resubscribeBound = null;
+      try {
+        resolve(knownId ?? currentSessionIdOf(sessions.list.getSnapshot()));
+      } finally {
+        resubscribeBound = hook;
       }
+      subscribeBound();
       scheduleDeferredRenders();
     };
+    resubscribeBound = subscribeBound;
     rebind();
-    render(); // 初始渲染：不依赖订阅触发（修复：会话打开即检查幽灵）
+    renderTraced('other'); // 初始渲染：不依赖订阅触发（修复：会话打开即检查幽灵）
     // 历史环的拉取在 resolve() 绑定成功处统一发起（冷启动经上面的 rebind），
     // 这里不再补发——旧的「初始化时拉一次」在会话尚未就绪时必然落空。
     const onList = (): void => {
       // 会话切换（mainView 保有者变化）→ 重绑订阅（resolve 内即发起 pull）；否则仅渲染。
       const id = currentSessionIdOf(sessions.list.getSnapshot());
       if (id !== lastSessionId) rebind(id);
-      render();
+      renderTraced('other');
     };
     const unList = sessions.list.subscribe(onList);
     // IME 组词抑制：捕获监听（编辑器内组合事件会冒泡到 window）。组词开始
     // 立即隐藏幽灵；结束（候选上屏）后按已提交草稿重新渲染。
     const onCompositionStart = (): void => {
       composing = true;
-      render();
+      renderTraced('other');
     };
     const onCompositionEnd = (): void => {
       composing = false;
-      render();
+      renderTraced('other');
     };
     window.addEventListener('keydown', onKeyDown, true);
     window.addEventListener('compositionstart', onCompositionStart, true);
@@ -1482,11 +1616,17 @@ function applyBody(ctx: Context): void {
     return () => {
       unList();
       for (const un of unsubs) un();
+      unsubs = [];
+      resubscribeBound = null;
       for (const t of deferredRenders) clearTimeout(t);
       if (pullRetryTimer !== null) clearTimeout(pullRetryTimer);
       pullRetryTimer = null;
       pendingPull = null;
       clearInlineTimer();
+      // 计时器句柄已清，策略状态必须同步归零：留着旧 ticket 会让重绑后的第一帧
+      // 把「同键观察」判成 skip，于是再也不 armed。
+      armState = initialInlineArmState();
+      lastSkipReason = null;
       window.removeEventListener('keydown', onKeyDown, true);
       window.removeEventListener('compositionstart', onCompositionStart, true);
       window.removeEventListener('compositionend', onCompositionEnd, true);
@@ -1646,7 +1786,13 @@ function remoteSettingsScope(
   readValue();
   // 此后由内核转发的设置变更事件驱动——**无轮询**。`$on` 返回的 disposer 归
   // `dispose()` 管（scope 与订阅者是多对一：单个订阅者退订不销毁 scope）。
-  const offUpdated = remote.$on?.('settings/document-updated', () => readValue());
+  // 同 applySettings：只认本命名空间的文档更新，别的条目写入不打到这里（省一次
+  // describe 往返，也断掉「describe 内 emit → 再 describe」的喂火环）。
+  const offUpdated = remote.$on?.('settings/document-updated', (...args: unknown[]) => {
+    const evNs = typeof args[0] === 'string' ? args[0] : undefined;
+    if (evNs !== undefined && evNs !== ns) return;
+    readValue();
+  });
 
   return {
     getSnapshot: () => snapshot,
