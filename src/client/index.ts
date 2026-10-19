@@ -41,6 +41,7 @@ import {
   wordMatchBase,
   type DraftSnapshot,
 } from './accept-guard.ts';
+import { buildOpsPayload, createSeqSource } from './ops-envelope.ts';
 import { nextAcceptChunk } from './chunk.ts';
 import {
   configValuesEqual,
@@ -1120,6 +1121,9 @@ function applyBody(ctx: Context): void {
   // UI 语言服务（可选）：每次写 _ops 时捎带给 host，供语言检测做先验加成。
   const locale = ctx.get('locale') as LocaleFaceLike | undefined;
 
+  /** `_ops` 载荷的单调序号源（页面级，刷新后从 1 重来，理由见 ops-envelope.ts）。 */
+  const opsSeq = createSeqSource();
+
   /**
    * `_ops` 反向通道的写面（经 `remote.settings.mutate` 请求 host 推送历史环）。
    *
@@ -1138,19 +1142,11 @@ function applyBody(ctx: Context): void {
   const writeOps = (payload: string): Promise<boolean> => {
     const svc = remoteOf(ctx)?.settings;
     if (svc === undefined) return Promise.resolve(false);
-    // 捎带 UI 语言：解析 payload 并注入 locale 字段（如果 payload 是合法 JSON 对象）
-    let enriched = payload;
-    try {
-      const obj = JSON.parse(payload);
-      if (obj !== null && typeof obj === 'object' && !Array.isArray(obj)) {
-        const active = locale?.getSnapshot?.()?.active;
-        if (typeof active === 'string' && active.length > 0) {
-          enriched = JSON.stringify({ ...obj, locale: active });
-        }
-      }
-    } catch {
-      // payload 非 JSON，原样发送
-    }
+    // 信封：注入进程内单调 seq，并在有值时捎带 locale。
+    // 为什么必须有 seq：宿主按载荷全等给 `_ops` 去重，而「消费后清空 `_ops`」在
+    // settings 事件回调里是结构性不可能的（内核 HMR 事务拒绝嵌套写），没有序号时
+    // 「改走别的草稿再删回来」这类合法重发会被当成回声静默吞掉。见 ops-envelope.ts。
+    const enriched = buildOpsPayload(payload, locale?.getSnapshot?.()?.active, opsSeq.next());
     // 写 CAS：先 describe 拿当前 revision，再按该 revision 提交 mutate。
     // **不能传常量 0**——文档 revision 一旦 >0，expected=0 的写入会被内核按
     // 版本冲突拒绝；若远程层不抛错则表现为「mutate OK 但值从未落盘」的假成功。
