@@ -14,6 +14,8 @@
  * @module dsh-suggest-ghost
  */
 
+import { statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import z from '@deepseek-ai/schemastery';
 import type { Volatile } from '@deepseek-ai/cosmokit';
 import type { Context } from '@deepseek-ai/cordis';
@@ -230,7 +232,45 @@ function lastSuggestedTurnInLog(session: Session): number {
  * @param ctx - 提供 LLM 与会话服务的 cordis 上下文。
  * @param config - 必填的有界生成策略。
  */
+
+/**
+ * `_ops` / `_push` 通道的**语义留痕**唯一落点（模块级，所以 apply() 入口也能用）。
+ *
+ * ⚠️ **这里必须是 `console.log`。改回 `ctx.logger` 单通道等于把留痕删掉**：
+ * 宿主全局只有一个 logger exporter（`@deepseek-ai/dsh-app-boot/lib/index.js:4053-4066`，
+ * `levels:{default:2}` 挡掉 debug、回调只收 warn/error 所以 info 也丢），而它攒的
+ * startupLogs 只在**启动失败**时由 `dsh/lib/bin.js:158 reportStartupFailure` 写盘
+ * → 健康进程里 ctx.logger 一个字都不落任何地方。`console.log → stdout → tee
+ * ~/.dsh/dsh-web.log` 是运行期唯一可见面。
+ * 语义留痕（收到什么 op / 消费结果 / 被拒原因 / 写后凭证 / 本次加载的构建）
+ * 不属于「可清理的调试噪声」，别把它和现场 dump 一起删。
+ */
+const traceOps = (message: string): void => {
+  console.log(`[dsh-suggest-ghost][ops-trace] ${message}`);
+};
+
+/**
+ * 本模块被加载时那份产物的 mtime（在**模块顶层**求值，所以它记的是"这次加载读到的
+ * 文件"，而不是之后某个时刻盘上的最新版本）。
+ *
+ * 为什么值得记：本仓 `lib/` 是入库产物、宿主加载 `lib/index.js`，而 `src/` 改了不重建、
+ * 或重建后进程没重载，都会让「我改完了」和「跑的是旧字节」同时成立且无法区分
+ * （issue #20 记的就是这种白跑一轮）。有这一个值，任何一次 apply() 打印出来的时刻
+ * 与当前盘上时刻一比就知道差了几份构建。
+ */
+const LOADED_ARTIFACT_MTIME = (() => {
+  try {
+    return statSync(fileURLToPath(import.meta.url)).mtime;
+  } catch {
+    return null;
+  }
+})();
+
 export function apply(ctx: Context, config: GenerateConfig): void {
+  // 每次挂载打一行，回答两件事：**这个进程现在跑的是哪份构建**（mtime），以及
+  // 刚才那次改动有没有真的把模块换进来（hmr partialReload 会重新 apply）。
+  // 只在挂载时出现，正常一次进程一到几行，不是可清理的调试噪声。
+  traceOps(`apply called; artifact mtime=${LOADED_ARTIFACT_MTIME?.toISOString?.() ?? 'unknown'}`);
   const resolved = resolveConfig(config);
   const states = new WeakMap<Session, SessionState>();
   const tracked = new Set<SessionState>();
@@ -277,38 +317,6 @@ export function apply(ctx: Context, config: GenerateConfig): void {
    */
   let liveSettingsFailed = false;
   /** 上一次已留痕的实时快照 revision（按 revision 去重，避免 TTL 刷新反复打行）。 */
-  /**
-   * `_ops` / `_push` 通道的**语义留痕**唯一落点。
-   *
-   * ⚠️ **这里必须是 `console.log`。改回 `ctx.logger` 单通道等于把留痕删掉**——三条
-   * 本机 0.2.0-rc.2 产物里核对过的事实（issue #20 只记到了第 1 条的一半）：
-   *  1. 宿主全局**只注册了一个 logger exporter**：
-   *     `@deepseek-ai/dsh-app-boot/lib/index.js:4053-4066`。它 `levels: { default: 2 }`
-   *     （cordis 级别 error0 / info1 / warn2 / debug3，见
-   *     `@deepseek-ai/cordis/lib/index.js:459-463`）把 `debug` 挡在门外，回调体又是
-   *     `if (type === "warn" || type === "error") startupLogs.push(...)` →
-   *     **`ctx.logger.info` 过了级别门也被回调丢弃**。
-   *  2. 那个 `startupLogs` 数组唯一的写盘机会是启动失败时的
-   *     `@deepseek-ai/dsh/lib/bin.js:158 reportStartupFailure`——文件开头就是
-   *     `WARNING: Raw diagnostics...` + `error: StartupError: dsh: startup failed`。
-   *     所以 `~/.dsh/logs/startup-*.log` 是**崩溃转储**，不是运行日志：健康进程里
-   *     ctx.logger 一个字都不落任何地方。
-   *  3. 宿主 stdout 被 tee 进 `~/.dsh/dsh-web.log`，`console.log` 是运行期**唯一**
-   *     可见面（本机历史证据：那文件里 3016 行 `[dsh-suggest-ghost]` 全是 console）。
-   *
-   * 于是 `6dfcd78`（删 console.log）和 `8e08e2e`（删 ctx.logger.info）连着两轮，
-   * 前者删掉的是唯一的可观测面，后者删掉的是本来就不存在的可观测面。
-   *
-   * 本 seam 是双通道：语义事件走 console.log（固定标记 `[dsh-suggest-ghost][ops-trace]`，
-   * grep 得到，见 docs/internals-cordis-settings-pitfalls.md），故障再补一份
-   * `ctx.logger.warn`，好在**启动失败转储**里也留一份证据。
-   *
-   * 量：每条都对应一个真实发生的通道事件，不在 render / 空转的 document-updated 上打
-   * （空载荷不留痕），同类故障另有节流，见 `traceFault`。
-   */
-  const traceOps = (message: string): void => {
-    console.log(`[dsh-suggest-ghost][ops-trace] ${message}`);
-  };
 
   /** 同类故障的累计次数（节流用）。 */
   const faultCounts = new Map<string, number>();
