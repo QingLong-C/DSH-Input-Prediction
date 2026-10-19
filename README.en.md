@@ -175,6 +175,22 @@ src/client/          ghost rendering, history matching, word splitting, shortcut
 scripts/             smoke tests and session log replay
 ```
 
+### Read this before touching the settings channel
+
+`_ops` / `_push` are the only two ways this plugin talks to the host, and three separate bugs came
+from that channel's semantics, not from business logic: `mutate()`'s third argument means "the
+revision I read" rather than "the value I want to overwrite", so a refused write can look like a
+successful one; a zod schema and a TS union are two separate truths, so adding an operation to only
+one of them drops payloads in silence; and a single-slot last-wins snapshot cannot carry a payload
+that exists for one moment, because the reader sees whatever was newest when it read. Two more that
+bite repeatedly: a volatile reference captured by `apply(ctx, config)` freezes after the first config
+write, and `settings/document-updated` never reaches the plugin's own `ctx`.
+
+[docs/internals-cordis-settings-pitfalls.md](docs/internals-cordis-settings-pitfalls.md) covers
+each as symptom, root cause, correct usage, wrong usage, with file:line and commit evidence. Every
+claim there is graded as fixed, awaiting a host restart, kernel contract, or plugin-local experience,
+and a pre-change checklist is at the end.
+
 ### Cold-start semantics (why it works right after a restart)
 
 "No data after a restart" is a misreading: **history lives in the session log, and the host re-sends the suggestion after checking it semantically.**

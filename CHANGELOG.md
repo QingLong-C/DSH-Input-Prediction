@@ -2,6 +2,41 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### 修复
+
+- **`_ops` 写入此前必然被版本冲突拒绝**：client 侧 `remote.settings.mutate(ns, ops, expectedRevision)`
+  的第三个参数是 CAS 的期望版本，此前固定传 `0`。`revision` 每次该命名空间内容变化都会推进（宿主自己
+  写 `_push`、消费后清空 `_ops` 都算），所以启动后的第一次写入之后，每一次 `expected=0` 的写入都被内核
+  拒绝，而客户端只看 Promise 状态，表现为「resolve 了但什么都没写」。现在改为先 `describe()` 取真实
+  revision 再提交，冲突时重取 revision 重试（上限 2 次）（#16，`a864545`）
+- **`complete` 操作被 zod 整批拒绝**：`opsPayloadSchema` 的 `discriminatedUnion('op', …)` 缺少 `complete`
+  变体，而 `HotnessOp` 的 TS 类型里有；校验失败会让**整批** ops 一起被丢弃，停顿续写因此从不触发（#17，
+  `8e2e5c0`）。两份声明互不约束，编译器不会报这种漂移
+- **停顿续写推送到客户端总是丢失**：`_push` 是单槽 last-wins 快照，续写载荷只存在一瞬间，随后任何其他
+  会话的 pull 应答都会重写它；客户端是「事件 → 异步 `describe()`」的快照式读取，读不到被覆盖的中间值。
+  宿主现在全局追踪 `lastCompletion {sessionId, completion}`，并在目标会话缓存未命中时持续捎带最近一次续写；
+  跨会话误显示由客户端既有的 `completionSessionId` + `draft` 全等双校验兜住（#18，`bceac31`）。
+  **运行时验证未完成**：需要重启宿主后观察续写显示，本条目只记录代码已合入
+
+### 文档
+
+- 新增 `docs/internals-cordis-settings-pitfalls.md`：settings 双向通道与 volatile 引用的五条内核语义陷阱
+  （`mutate` 的期望版本、TS 类型与 zod schema 漂移、单槽快照装不下一次性载荷、`apply(ctx, config)` 捕获的
+  引用冻结、cordis 事件只向父传播），每条按「症状 → 根因 → 正确用法 → 错误用法 → 出处」写，并区分
+  「已修」「待宿主验证」「内核契约」「仅本插件经验」
+- 新增 `docs/upstream-feedback-settings-proxy.md`：#16 遗留思考的上游反馈草稿，**尚未提交给内核维护者**
+- README.md / README.en.md 的「开发」章节各加一节「改双向 settings 通道前必读」，指向上面两篇文档
+
+### 已知缺口
+
+- #17 同时要求「schema 拒绝路径必须留痕」，那行日志（`parseHotnessOps` 打印 issues 摘要）已随 main 的
+  `6dfcd78`（chore: remove all debug console.log statements）一并删除；`parseHotnessOps` 现在三条返回空
+  ops 的路径全部静默。#16 的冲突/失败日志同批被删（重试逻辑本身保留）
+- #16 的写后读回校验仍缺：`writeOps` 成功兑现不等于值已落盘（对比设置卡片路径写入后会 `readValue()`）
+- #19 遗留未修：用户可调项仍从被捕获的 `resolved` 读取，也就是会冻结的 volatile 引用（另分支处理）
+
 ## [0.5.0] - 2026-10-10
 
 ### 新增

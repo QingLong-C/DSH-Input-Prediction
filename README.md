@@ -197,6 +197,19 @@ src/client/          幽灵渲染、历史匹配、逐词切分、快捷键、�
 scripts/             冒烟测试与会话日志回放
 ```
 
+### 改双向 settings 通道前必读
+
+`_ops` / `_push` 是插件与宿主之间唯一的通道，改过的三个缺陷都长在通道语义上而不是业务逻辑
+上：`mutate()` 的第三个参数是「我读到的 revision」而不是「我要覆盖的版本」，被拒时看起来像
+写成功；zod schema 与 TS 联合类型是两份互不约束的真相，只改一边就静默丢载荷；单槽 last-wins
+快照装不下「只存在一瞬间」的载荷。另外两条更容易反复踩到：`apply(ctx, config)` 捕获的
+volatile 引用会在首次配置写入后冻结，`settings/document-updated` 挂在插件自己的 `ctx` 上
+收不到。
+
+见 [docs/internals-cordis-settings-pitfalls.md](docs/internals-cordis-settings-pitfalls.md)：
+每条按「症状 → 根因 → 正确用法 → 错误用法」写，附源码行号与 commit，并区分「已修」「待宿主
+验证」「内核契约」「仅本插件经验」四档确定性，文末是改动前后的复查清单。
+
 ### 冷启动语义（重启后为何立即可用）
 
 重启后「没有数据」并非真的没数据：**历史在会话日志里，建议由 host 按语义校验后重推**。
