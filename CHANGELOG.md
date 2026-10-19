@@ -18,7 +18,8 @@ All notable changes to this project will be documented in this file.
   会话的 pull 应答都会重写它；客户端是「事件 → 异步 `describe()`」的快照式读取，读不到被覆盖的中间值。
   宿主现在全局追踪 `lastCompletion {sessionId, completion}`，并在目标会话缓存未命中时持续捎带最近一次续写；
   跨会话误显示由客户端既有的 `completionSessionId` + `draft` 全等双校验兜住（#18，`bceac31`）。
-  **运行时验证未完成**：需要重启宿主后观察续写显示，本条目只记录代码已合入
+  ⚠️ 该方案**不充分**：它只解决「瞬时载荷被 last-wins 覆盖」，没解决「载荷写不进盘」。真实根因与
+  修复见下面 #22 那条（事务外排水锚点），已端到端验到幽灵可见
 - **采纳建议会吞掉用户刚打的字**（#4，`3a06a6b`）：Tab 整条采纳与 `→` 逐词采纳都是
   「读草稿快照 → 拼 `accepted` → `setDraft`」，两步之间没有任何校验。原生输入先于 React 渲染
   到达宿主草稿存储，所以用户在这两步之内打的字会被整段覆盖。现在以 `ghostContent()` 同一帧
@@ -35,14 +36,50 @@ All notable changes to this project will be documented in this file.
   调用并就地换掉 `bound`（会话晚就绪），旧会话的三条 store 订阅此前一直挂到下次真切换才清，
   现在退订/订阅收敛到 `subscribeBound` 单一出口。虚拟时钟对照：armed 行数 1999 → 37、
   `setTimeout` 调用 1999 → 37、complete op 触发时刻 24780ms → 4700ms
-  （`scripts/render-storm-smoke.mjs`）。**浏览器内的实测归因仍未做**：三个来源各自的事件数
-  搭在 `inline armed` 行里打印，留给下次运行时观察
+  （`scripts/render-storm-smoke.mjs`）。**浏览器内归因已实测完成**：`renders{session=146,
+  input=7,face=0,other=80}` —— 洪水来自 `sessions.list` 订阅（`onList`，未切会话时也无条件
+  render）与错峰补渲染定时器，**不是**原推测的 `input.state.subscribe`；一次上百次 render 只产生
+  一次 armed，修复在真实环境成立
 - **设置页改开关在运行中不生效**（#19 遗留，`95994d6`）：`liveSettings = flattenConfig(resolved)`
   与 `effective()` 的两个入参同源，读的都是 `apply(ctx, config)` 首次解析并 `deepFreeze` 的时刻
   快照，内核重解析永不回填。新增 `src/live-settings.ts` 做「事件驱动标脏 + 下一次读才
   `describe()` + 5s TTL 兜底」的实时读源，`bootSettings` 降级为默认层，实时覆盖值按
-  `keyof FlatConfig` 键表逐键取（`_ops`/`_push` 在类型层就落不进设置）。**需宿主重启后按
-  issue #19 的验收清单确认**
+  `keyof FlatConfig` 键表逐键取（`_ops`/`_push` 在类型层就落不进设置）。隔离实例已实测到
+  `live settings refreshed rev=… applied=23`（按 revision 变化去重），即"改了能被重新读到"第一次
+  成为可直接观察的事实；设置页各开关的逐项人工确认仍待 live 宿主重启（issue #19 验收清单）
+
+- **同一个草稿再停顿多少次都不出续写**：宿主按载荷字符串全等给 `_ops` 去重，而「消费后清空
+  `_ops`」在 `settings/document-updated` 回调里是**结构性不可能**的——那次写入落在内核 HMR 的
+  `AsyncLocalStorage` 事务内，`runExclusive` 直接拒（`@deepseek-ai/dsh-hmr/lib/index.js:279-281`，
+  本机一个进程实测 `HMR transactions cannot be nested` 372/373 次）。两件事实叠起来等于
+  「同一份载荷永远只会被消费一次」：`pull` 因 `rev` 自增侥幸躲过，`complete` 的载荷
+  `{rev:0, ops:[{op:'complete', sessionId, draft}]}` 逐字节由草稿决定，于是
+  「输入 A → 停顿 → 改成 B → 删回 A → 再停顿」这条合法重发被当成回声静默丢弃。现在每次写入自带
+  进程内单调 `seq`（新增 `src/client/ops-envelope.ts`，纯函数，locale 捎带一并收进来），
+  去重回到它本来的职责。`scripts/ops-envelope-smoke.mjs` 断言不变量，并断言新增顶层键不会被宿主
+  拒（`opsPayloadSchema` 非 strict；反向验过未知 op 仍被拒，判据不是永真）
+
+- **故障留痕的节流按 kind 计数会吞掉新故障**：`traceFault` 原先用 `kind` 做计数键，于是
+  「路由缺失」报出第一条之后，同一 50 次窗口里混进来的**任何不同性质**的新故障（写锁超时、
+  模型 4xx、投影服务缺失）都被同一个计数器一起丢弃——等于主动重犯 #17 批评的静默丢弃。现在计数键
+  改成 `kind + 归一化签名`（新增 `src/fault-signature.ts`）：同类只报计数，新类必定独立报出
+  第一条。归一化只抹「每条都不同但显然同类」的部分（会话 id、`after Nms`、任意数字），
+  原因文本保留，所以签名不会退化成常量。`scripts/fault-signature-smoke.mjs` 六组断言里
+  最关键的一组就是「四类不同故障必须落在四个桶」
+- **停顿续写的投递被内核事务拒绝，幽灵永远不出现**（#22，同时也是 #18 未修的那一半）：宿主消费
+  `complete` → 生成续写成功 → 在 `await` 之后的续体里写 `_push` → 内核拒 `HMR transactions cannot be
+  nested`（判据是 `dsh-hmr/lib/index.js:271,280,284` 的 `AsyncLocalStorage.getStore()`；ALS 沿
+  await / microtask / **事务内建立的 timer** 传播，所以"推迟一个 tick"不逃逸）。实测五种写上下文
+  后确定：**只有 `apply()` 期建立的异步上下文在事务外**（`boot-setInterval` 写入 OK 147ms，而
+  completion 续体内的写入 1ms 即被拒）。新增 `src/deferred-writes.ts`（push/clearOps 两槽队列、
+  时间与次数淘汰、`decidePushDrain`/`decideClearOpsDrain` 两个可离线证伪的判定）与 apply() 期
+  `setInterval` 排水 pump，两个 nested 拒绝分支由"丢弃"改为"排队补写"。两条安全约束：带续写的载荷
+  超 8s 丢弃（续写只对其所属草稿有意义，不做无界补投）；补做 `_ops` 清空前先比对盘上现值与入队时
+  同步捕获的那份，不等就放弃（否则会吃掉未消费的新 op）。隔离实例端到端实测：
+  `push refused … queued carriedCompletion=1` → `deferred push landed rev=3 carriedCompletion=1
+  after=301ms attempts=1`，客户端 `#dsh-suggest-ghost-overlay[data-shown="1"]` 首次真的显示出续写；
+  `_ops` 清空也开始成功（连带缓解"载荷长期滞留盘上、重启即被重放"）。**热重载不能用来验这条**：
+  HMR 重建的 pump 仍带 `store=true`，部署必须整进程重启
 
 ### 文档
 
@@ -65,21 +102,6 @@ All notable changes to this project will be documented in this file.
   上述判据，含「新文件 add 不进去」这条事故机制本身
 - README.md / README.en.md 的「开发」章节各加一节，写清宿主加载哪份副本、以及改动到重启之间的落盘顺序
 
-### 修复
-
-- **同一个草稿再停顿多少次都不出续写**：宿主按载荷字符串全等给 `_ops` 去重，而「消费后清空
-  `_ops`」在 `settings/document-updated` 回调里是**结构性不可能**的——那次写入落在内核 HMR 的
-  `AsyncLocalStorage` 事务内，`runExclusive` 直接拒（`@deepseek-ai/dsh-hmr/lib/index.js:279-281`，
-  本机一个进程实测 `HMR transactions cannot be nested` 372/373 次）。两件事实叠起来等于
-  「同一份载荷永远只会被消费一次」：`pull` 因 `rev` 自增侥幸躲过，`complete` 的载荷
-  `{rev:0, ops:[{op:'complete', sessionId, draft}]}` 逐字节由草稿决定，于是
-  「输入 A → 停顿 → 改成 B → 删回 A → 再停顿」这条合法重发被当成回声静默丢弃。现在每次写入自带
-  进程内单调 `seq`（新增 `src/client/ops-envelope.ts`，纯函数，locale 捎带一并收进来），
-  去重回到它本来的职责。`scripts/ops-envelope-smoke.mjs` 断言不变量，并断言新增顶层键不会被宿主
-  拒（`opsPayloadSchema` 非 strict；反向验过未知 op 仍被拒，判据不是永真）
-
-### 开发工具
-
 - README 中英版各加一节「宿主层改动怎么不重启就生效」：本 profile 把 `hmr.config.root` 合成成
   `[]`（只监听配置文件），而默认 `ignored` 里的 `**/node_modules` 又把 `link:` 形态的本插件排除掉，
   两层原因叠起来才造成「改宿主代码必须重启」。附可直接用的 `root/ignored/debounce` 片段、
@@ -87,18 +109,6 @@ All notable changes to this project will be documented in this file.
 - `src/index.ts` 里「volatile 字段不落盘，故内存里没有跨进程残留」这条断言**是错的**，已按观测更正：
   `_ops`/`_push` 实际写在 profile 文档里，且一个复制该 profile 的新实例在没有任何客户端连接时就
   重放了遗留 `complete` 载荷。连带说明「消费后清空」为何长期失败、代价是什么
-
-### 修复
-
-- **故障留痕的节流按 kind 计数会吞掉新故障**：`traceFault` 原先用 `kind` 做计数键，于是
-  「路由缺失」报出第一条之后，同一 50 次窗口里混进来的**任何不同性质**的新故障（写锁超时、
-  模型 4xx、投影服务缺失）都被同一个计数器一起丢弃——等于主动重犯 #17 批评的静默丢弃。现在计数键
-  改成 `kind + 归一化签名`（新增 `src/fault-signature.ts`）：同类只报计数，新类必定独立报出
-  第一条。归一化只抹「每条都不同但显然同类」的部分（会话 id、`after Nms`、任意数字），
-  原因文本保留，所以签名不会退化成常量。`scripts/fault-signature-smoke.mjs` 六组断言里
-  最关键的一组就是「四类不同故障必须落在四个桶」
-
-### 开发工具
 
 - 新增 `scripts/dev-sandbox.mjs`：一条命令拉起**隔离的第二个 DSH 实例**用于验证宿主层改动
   （`pnpm run sandbox` / `sandbox:check`）。隔离做在两层：`DSH_HOME` 独立（`sessions`/`storages`/
@@ -116,23 +126,32 @@ All notable changes to this project will be documented in this file.
 
 ### 已知缺口
 
-- #17 要求「schema 拒绝路径必须留痕」，那行日志（`parseHotnessOps` 打印 issues 摘要）已随 main 的
-  `6dfcd78`（chore: remove all debug console.log statements）一并删除；`parseHotnessOps` 现在三条返回空
-  ops 的路径全部静默，而 :265 的注释还写着「必须留痕」。**留痕改走 `ctx.logger.warn` 正在处理**
-  （分支 `fix/issue-16-17-writeback`），console.log 会被下一轮清理当成调试噪声删掉
-- #16 的写后读回校验仍缺：`writeOps` 成功兑现不等于值已落盘（对比设置卡片路径写入后会 `readValue()`）；
-  冲突判定也还是 `/conflict|revision/i` 文本匹配，未改用内核的 `error.code === 'SETTINGS_CONFLICT'`
-  （`@deepseek-ai/dsh-settings/lib/index.js:511`）。同分支处理中
-- 没有任何断言保证 `opsPayloadSchema` 覆盖 `HotnessOp` 的全部变体——#17 那类「类型有、schema 没有」的
-  漂移只能靠一条遍历变体的冒烟挡住。同分支处理中
-- #4 的残余窗口：宿主把编辑器提交批处理在 store 发布之前时，`draft` 与 `draftRev` 会**一起**是旧值，
-  内容/版本比对都看不出漂移。真正闭合要宿主把原子插入 verbs（`captureInsertion()` + `insertText(text, span)`）
-  交到插件手上，本插件用的是「校验后 `setDraft`」
-- #21 的运行时归因未做：1127 次 render 到底来自哪条订阅，只有浏览器里能看到（`inline armed` 行的
-  `renders{session,input,face,other}` 计数）；`remote.$on('settings/document-updated')` 是否真把
-  `(ns, revision)` 透传到客户端也待确认——载荷不带 ns 时代码退化成「不过滤」
-- `GhostPushPayload`（`src/settings.ts`）从未被用作类型约束，只在注释里出现，是第二份会漂移的真相；
-  宿主写的 `error` 字段客户端解析结构里没有（写了没人读）
+按当前代码状态核对过；下面每条都还成立（原先列在这里的四项已关掉，故移除：「#17 留痕被删」与「#16 写后读回」
+由 `89d3a1a`/`81778cf` 完成、「schema 变体覆盖无断言」由 `b947977` 的冒烟挡住、
+「#21 运行时归因」由隔离实例实测完成 —— 它是测量结果不是代码改动，所以没有对应 commit）：
+
+- **宿主侧 settings 写面普遍没有 CAS**：`ctx.settings.update(ns, patch)` 的第三参
+  `expectedRevision` 在本插件所有调用点都没传，而内核判据是 `expected !== void 0`
+  （`dsh-settings/lib/index.js:511`）——`expected` 缺省时**整段冲突校验被跳过**，调用必然"成功"。
+  唯一带真实 CAS 的是 `remote.settings.mutate` 那一次 `_ops` 写。设置卡片的
+  `remoteSettingsScope().set`（`src/client/index.ts`）同样忽略 `mutate` 的 `ok`：保存冲突时卡片
+  显示成功，随后被下一次 `readValue()` 静默改回
+- **续写投递是"排队补写"而不是根治**：被事务拒绝的写入交给 apply() 期 pump 补投（最坏 +500ms），
+  根治要内核提供事务外退出（`executing.exit()` 一类）或把 `document-updated` 改成事务外 emit，
+  见 `docs/upstream-feedback-settings-proxy.md` 第二诉求。另有一个未修的 sub-tick 竞态：pump 取走
+  旧载荷在途时来了更新载荷，旧的仍会落一次盘再被新的覆盖；根除需要 `_push` 写入带 revision CAS
+- **#4 的残余窗口**：宿主把编辑器提交批处理在 store 发布之前时，`draft` 与 `draftRev` 会一起是
+  旧值，内容/版本比对都看不出漂移。闭合要宿主把 `captureInsertion()` + `insertText(text, span)`
+  交到插件手上（采纳是整段替换，用 span 反而引入新的坐标系假设，理由写在 `accept-guard.ts`）
+- **`GhostPushPayload` 是第二份会漂移的真相**：它从未被用作类型约束（全仓只在注释里出现），要让它
+  受编译器管得先把 `src/index.ts` 里那个局部 `ClientPush` 提升为导出类型再派生 —— 跨 3 个文件的
+  结构性改动，且会立刻把"宿主写 `error` 字段、客户端解析结构里没有它"变成显式契约问题
+- **#19 的逐项人工确认**：`live settings refreshed` 已实测到，但设置页各开关（停顿续写 / LLM 建议 /
+  阈值 / top-K 含 0=不限 / 冷启动对账 / 热度面板）仍需 live 宿主重启后按 issue #19 清单逐项过一遍
+- **运行期日志通道只有 stdout**：健康进程里 `ctx.logger` 不落任何地方（exporter 只收 warn/error，
+  且 `startupLogs` 只在启动失败时写盘），而 `console.log` 又是 `6dfcd78` 那类"清理调试噪声"的
+  删除目标。本插件用固定标记 `[dsh-suggest-ghost][ops-trace]` 区分语义留痕与调试噪声，但通道本身
+  的缺失是平台问题，语义留痕长期该有正式落点
 
 ## [0.5.0] - 2026-10-10
 
