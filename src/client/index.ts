@@ -912,7 +912,6 @@ function applyBody(ctx: Context): void {
       if (completion === null || completion === undefined
         || settings.completionSessionId !== currentId
         || completion.draft !== draft) {
-        console.log(`[suggest-ghost] completion not shown: has=${completion != null}, sidMatch=${settings.completionSessionId === currentId}, draftMatch=${completion != null && completion.draft === draft}${completion != null ? `, want=${JSON.stringify(completion.draft.slice(0, 24))}, have=${JSON.stringify(draft.slice(0, 24))}` : ''}`);
       }
       if (completion !== null && completion !== undefined
         && settings.completionSessionId !== null && settings.completionSessionId === currentId
@@ -1080,14 +1079,12 @@ function applyBody(ctx: Context): void {
           return svc.mutate(SETTINGS_NAMESPACE, [{ op: 'set', path: ['_ops'], value: enriched }], rev);
         })
         .then(
-          () => { console.log('[suggest-ghost] writeOps: mutate OK'); return true; },
+          () => { return true; },
           (error: unknown) => {
             // 版本冲突（host 自写 _push 会频繁推进 revision）：重取 revision 重试一次。
             if (attempt < 2 && /conflict|revision/i.test(String(error))) {
-              console.log(`[suggest-ghost] writeOps: conflict, retry ${attempt + 1}`);
               return doWrite(attempt + 1);
             }
-            console.log('[suggest-ghost] writeOps: mutate FAILED:', String(error).slice(0, 200));
             return false;
           },
         );
@@ -1108,23 +1105,19 @@ function applyBody(ctx: Context): void {
   const scheduleInlineTrigger = (): void => {
     clearInlineTimer();
     if (!settings.inlineEnabled || bound === null) {
-      console.log(`[suggest-ghost] inline skip: enabled=${settings.inlineEnabled}, bound=${bound !== null}`);
       return;
     }
     const draft = bound.input.state.getSnapshot().draft;
     if (draft.trim().length < settings.inlineMinChars) return;
     const currentId = currentSessionIdOf(sessions.list.getSnapshot());
     if (currentId === undefined) {
-      console.log('[suggest-ghost] inline skip: no current session id');
       return;
     }
-    console.log(`[suggest-ghost] inline armed: delay=${settings.inlineDelayMs}, draft=${JSON.stringify(draft.slice(0, 26))}, session=${currentId}`);
     inlineTriggerTimer = setTimeout(() => {
       inlineTriggerTimer = null;
       // 再次校验：定时器到期时草稿可能已变（被 render 重置了 timer 但 draft 也变了）。
       const draftNow = bound?.input.state.getSnapshot().draft ?? '';
       if (draftNow.trim().length < settings.inlineMinChars) return;
-      console.log('[suggest-ghost] inline trigger FIRED: sending complete op');
       writeOps(JSON.stringify({ rev: 0, ops: [{ op: 'complete', sessionId: currentId, draft: draftNow }] }));
     }, settings.inlineDelayMs);
   };
@@ -1242,7 +1235,6 @@ function applyBody(ctx: Context): void {
           if (typeof v._push === 'string' && v._push !== '') {
             try {
               pushed = JSON.parse(v._push) as typeof pushed;
-              console.log(`[suggest-ghost] _push arrived: rev=${(pushed as { rev?: number }).rev}, completion=${(pushed?.completion !== undefined ? 'YES' : 'no')}, completionSid=${JSON.stringify(pushed?.completionSessionId ?? null)}`);
             } catch {
               pushed = null;
             }

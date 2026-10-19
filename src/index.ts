@@ -229,7 +229,6 @@ function lastSuggestedTurnInLog(session: Session): number {
  * @param config - 必填的有界生成策略。
  */
 export function apply(ctx: Context, config: GenerateConfig): void {
-  console.log('[dsh-suggest-ghost] apply() called, starting plugin initialization...');
   ctx.logger.info('dsh-suggest-ghost: apply() called, starting plugin initialization...');
   const resolved = resolveConfig(config);
   const states = new WeakMap<Session, SessionState>();
@@ -277,7 +276,6 @@ export function apply(ctx: Context, config: GenerateConfig): void {
             : [];
         for (const row of rows as Array<{ ns?: string; revision?: number; value?: Record<string, unknown> }>) {
           if (row?.ns !== SUGGEST_GHOST_NAMESPACE) continue;
-          console.log(`[dsh-suggest-ghost] describe: revision=${row.revision}, _ops=${JSON.stringify(row.value?._ops).slice(0, 150)}`);
           const v = row.value?._ops;
           if (typeof v === 'string') return v;
         }
@@ -290,12 +288,10 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     return typeof payload === 'string' ? payload : EMPTY_PUSH;
   };
   ctx.inject(['settings'], (settingsCtx) => {
-    console.log('[dsh-suggest-ghost] settings inject callback called');
     ctx.logger.info('dsh-suggest-ghost: settings inject callback called');
     try {
       const svc = (settingsCtx as { settings?: { update: (ns: unknown, patch: object) => Promise<void> } }).settings;
       if (svc === undefined) {
-        console.log('[dsh-suggest-ghost] settings service is undefined!');
         ctx.logger.warn('dsh-suggest-ghost: settings service is undefined');
         return;
       }
@@ -323,9 +319,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       // **关键**：cordis 事件只向父级传播、不向子级传播。该事件 emit 在 settings
       // 服务的 ownerContext 上，插件自己的 ctx 收不到——必须监听 root。
       const eventCtx = (ctx as unknown as { root?: typeof ctx }).root ?? ctx;
-      console.log('[dsh-suggest-ghost] registering settings/document-updated on eventCtx');
       eventCtx.on('settings/document-updated', (ns: string, revision?: number) => {
-        console.log(`[dsh-suggest-ghost] settings/document-updated received, ns = ${ns}, rev = ${revision}, expected = ${SUGGEST_GHOST_NAMESPACE}`);
         if (ns !== SUGGEST_GHOST_NAMESPACE) return;
         // 三点对照：①内核 raw（configEditor 条目）②插件捕获的 volatile 引用 ③describe 值
         try {
@@ -333,11 +327,9 @@ export function apply(ctx: Context, config: GenerateConfig): void {
           const row = editor?.entries?.().find((r) => r.options.id === SUGGEST_GHOST_NAMESPACE);
           const rawOps = row?.config?._ops;
           const refOps = (resolved as { _ops?: { get?: () => unknown } })._ops?.get?.();
-          console.log(`[dsh-suggest-ghost] 3way: raw=${JSON.stringify(rawOps).slice(0, 130)} ref=${JSON.stringify(refOps).slice(0, 130)}`);
-        } catch (e) { console.log(`[dsh-suggest-ghost] 3way probe failed: ${String(e).slice(0, 150)}`); }
+        } catch { /* noop */ }
         liveSettings = flattenConfig(resolved);
         const payload = readOps();
-        console.log(`[dsh-suggest-ghost] payload = ${JSON.stringify(payload).slice(0, 300)}`);
         if (payload === lastOpsPayload) {
           return;
         }
@@ -346,7 +338,6 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       });
       ctx.logger.info('dsh-suggest-ghost: settings wired (volatile config, ns=suggest-ghost)');
     } catch (error) {
-      console.log(`[dsh-suggest-ghost] settings wiring failed: ${String(error)}`);
       ctx.logger.warn(`dsh-suggest-ghost: settings wiring failed: ${String(error)}`);
     }
   });
@@ -479,22 +470,17 @@ export function apply(ctx: Context, config: GenerateConfig): void {
    * 4. 缓存命中时直接重推（同 sessionId+draft 的缓存结果）
    */
   const handleComplete = (sessionId: string, draft: string): void => {
-    console.log(`[dsh-suggest-ghost] handleComplete called, sessionId = ${sessionId}, draft = ${JSON.stringify(draft)}`);
     const cfg = effective();
     if (cfg.inlineEnabled === false) {
-      console.log(`[dsh-suggest-ghost] inlineEnabled is false, skip`);
       return;
     }
     if (draft.trim().length < cfg.inlineMinChars) {
-      console.log(`[dsh-suggest-ghost] draft too short, skip`);
       return;
     }
     const session = ctx.sessions.get(sessionId as SessionId);
     if (session === undefined) {
-      console.log(`[dsh-suggest-ghost] session not found, skip`);
       return;
     }
-    console.log(`[dsh-suggest-ghost] session found, generating completion...`);
     // 缓存命中：同 sessionId+draft → 直接重推。
     const cached = completionCache.get(sessionId);
     if (cached !== undefined && cached.draft === draft) {
@@ -526,10 +512,8 @@ export function apply(ctx: Context, config: GenerateConfig): void {
         if (completionPending.get(sessionId) !== controller) return;
         completionPending.delete(sessionId);
         if (result.text === undefined) {
-          console.log(`[dsh-suggest-ghost] completion empty/filtered for session ${sessionId}, silent`);
           return; // 空/不合格 → 静默
         }
-        console.log(`[dsh-suggest-ghost] completion generated for session ${sessionId}: ${JSON.stringify(result.text).slice(0, 120)} (${Date.now() - startedAt}ms)`);
         cacheCompletion(sessionId, draft, result.text);
         pushToClient({
           ...statePushOf(sessionId),
@@ -543,7 +527,6 @@ export function apply(ctx: Context, config: GenerateConfig): void {
         completionPending.delete(sessionId);
         // 中止 = 被新草稿取代，不算失败；其他错误静默丢弃。
         if (!controller.signal.aborted) {
-          console.log(`[dsh-suggest-ghost] completion FAILED for session ${sessionId}: ${String(error).slice(0, 300)}`);
           ctx.logger.debug?.(`dsh-suggest-ghost: completion failed for session ${sessionId}: ${String(error)}`);
         }
       },
@@ -711,7 +694,6 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     const ops = parsed.ops;
     if (ops.length === 0) return;
     for (const op of ops) {
-      console.log(`[dsh-suggest-ghost] consumeOps op=${op.op}, sessionId = ${(op as { sessionId?: string }).sessionId ?? '-'}`);
       if (op.op === 'pull') {
         ctx.logger.info(`dsh-suggest-ghost: consumeOps pull, sessionId = ${op.sessionId}`);
         // 无论历史环可不可得都应答：环缺失（会话尚未进店/已销毁）时 statePushOf
@@ -728,8 +710,8 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     void persistence.flush();
     // 消费完成：清空操作队列（下一次 watch 触发时 ops 为空，直接跳过）。
     void svc.update(SUGGEST_GHOST_NAMESPACE, { _ops: EMPTY_PUSH }).then(
-      () => console.log('[dsh-suggest-ghost] _ops cleared OK'),
-      (error: unknown) => console.log(`[dsh-suggest-ghost] _ops clear FAILED: ${String(error).slice(0, 300)}`),
+      () => { /* noop */ },
+      () => { /* noop */ },
     );
   };
 
@@ -876,6 +858,5 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       });
     }
   });
-  console.log('[dsh-suggest-ghost] apply() completed successfully');
   ctx.logger.info('dsh-suggest-ghost: apply() completed successfully');
 }

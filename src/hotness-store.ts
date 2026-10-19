@@ -263,7 +263,6 @@ export function parseHotnessOps(raw: string | undefined): ParsedOpsResult {
   const result = opsPayloadSchema.safeParse(parsed);
   if (!result.success) {
     // 静默丢弃会让「客户端写了、宿主没动」彻底不可诊断——必须留痕。
-    console.log(`[dsh-suggest-ghost] _ops payload REJECTED by schema: ${JSON.stringify(result.error.issues).slice(0, 300)}`);
     return { ops: [] };
   }
   return {
