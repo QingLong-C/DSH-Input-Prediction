@@ -191,6 +191,47 @@ each as symptom, root cause, correct usage, wrong usage, with file:line and comm
 claim there is graded as fixed, awaiting a host restart, kernel contract, or plugin-local experience,
 and a pre-change checklist is at the end.
 
+### Which copy the host actually loads
+
+**The host loads the worktree that `<profile>/node_modules/dsh-suggest-ghost` resolves to, not the one
+you are editing.** On this machine:
+
+```
+~/.dsh/profiles/web/node_modules/dsh-suggest-ghost
+  -> /home/wujue/workspace/dsh-plugins/dsh-suggest-ghost
+```
+
+Two related facts decide whether a verification round counts:
+
+- `lib/` is **committed to this repository**. The host imports `lib/index.js` (`package.json` `main`)
+  and `lib/client.js` (`exports["./client"]`). `src/*.ts` is only source: edit `src/`, skip the build,
+  restart the host, and it loads the previous bytecode.
+- Several git worktrees can exist at once (unavoidable when issues are fixed in parallel), and the
+  symlink points at exactly one of them. Changes built in any other copy never reach the host.
+
+Both checks are read-only:
+
+```bash
+node scripts/artifact-freshness.mjs   # is lib/ older than src/ (2s tolerance); which copy is deployed
+node scripts/gitignore-check.mjs      # tracked files covered by an ignore rule; fatal exits non-zero
+```
+
+The second check guards a silent failure mode. `lib/` has to stay tracked, so any rule that covers it
+(`build/`, `lib/`, `src/` in `.gitignore`, or a rule in `~/.config/git/ignore`) makes **newly created
+files in that directory stay out of the index**. The files are on disk, the build succeeds,
+`git status` looks clean, and `git checkout` cannot restore them, because git never knew they existed.
+One trap in the check itself: `git check-ignore` skips tracked paths unless you pass `--no-index`,
+which is precisely the case worth catching.
+
+Order of work, so a fix is not lost between editing and verifying:
+
+1. Change your worktree, run `pnpm run test:smoke`, continue only when it is green.
+2. Run `node build.mjs` and commit `src/` and `lib/` **together**.
+3. Run `node scripts/artifact-freshness.mjs` to confirm the build is current and the deployed copy is
+   the one you want the host to load.
+4. Only then ask for a restart. Never verify uncommitted work: concurrent sessions and external tools
+   write to this working tree without warning, and committed content is the only thing that comes back.
+
 ### Cold-start semantics (why it works right after a restart)
 
 "No data after a restart" is a misreading: **history lives in the session log, and the host re-sends the suggestion after checking it semantically.**
