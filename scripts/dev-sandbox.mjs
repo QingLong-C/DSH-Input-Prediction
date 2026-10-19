@@ -287,7 +287,9 @@ setTimeout(() => {
     'completion generated',              // 模型出东西了
     'completion dropped (empty or filtered)',
     'completion failed',                 // 常见是 no logged request route：新会话没有已记录请求
-    'push landed', 'push dropped inside settings transaction',   // #22 的那一跳
+    'push landed', 'push refused inside settings transaction',   // #22 的那一跳（被拒→排队）
+    'deferred push landed', 'deferred _ops cleared',             // 排水锚点真的补上了盘才算修好
+    'pump context is inside a transaction',                      // 出现这条 = 热重载部署踩坑，需整进程重启
     'live settings refreshed',           // #19
   ]) say(`    grep -F '${g}' ${log}`);
 }, 26_000);
