@@ -818,6 +818,8 @@ function applyBody(ctx: Context): void {
   let shown: { key: string; content: GhostContent; base: DraftSnapshot } | null = null;
   /** IME 组词进行中（compositionstart~end 之间）：组合预览文本与幽灵后缀
    * 会叠在同一位置，必须抑制幽灵显示（Cursor/VSCode 同款处理）。 */
+  /** 上一次「续写不显示」的理由，用于把每帧都要跑的判定压成状态变化时一行。 */
+  let lastCompletionSkip = '';
   let composing = false;
 
   /** live 设置值（来自 suggest-ghost 命名空间；缺失时用默认）。 */
@@ -984,9 +986,30 @@ function applyBody(ctx: Context): void {
     // 逐字相符且属于当前会话），其次历史前缀补全（即时、无网络）。
     if (draft.trim() !== '' && settings.inlineEnabled) {
       const completion = settings.completion;
-      if (completion === null || completion === undefined
-        || settings.completionSessionId !== currentId
-        || completion.draft !== draft) {
+      // 「宿主推了续写但本帧不显示」是 #15 验收的关键分叉：载荷没到（通道问题）、
+      // 到了但归属别的会话、还是到了且属于本会话却与当前草稿不逐字相符（用户在
+      // 生成期间又打了字）。三者过去在观测上完全同形 —— `6dfcd78` 删掉了那条
+      // `completion not shown` 日志，只留下一个空 if 块（删输出没删判定）。
+      // 本函数每帧都跑（实测一次输入会话列表就刷上百次），所以只在**理由变化时**
+      // 打一行，避免又造出一个 #21。
+      const skipReason = completion === null || completion === undefined
+        ? 'none'
+        : settings.completionSessionId !== currentId
+          ? 'other-session'
+          : completion.draft !== draft
+            ? 'draft-mismatch'
+            : completion.text === ''
+              ? 'empty-text'
+              : null;
+      if (skipReason !== null) {
+        if (skipReason !== lastCompletionSkip) {
+          lastCompletionSkip = skipReason;
+          console.log(`[suggest-ghost] completion not shown: reason=${skipReason}, draftChars=${draft.length}`
+            + (skipReason === 'draft-mismatch' && completion !== null && completion !== undefined
+              ? `, completionChars=${completion.draft.length}` : ''));
+        }
+      } else {
+        lastCompletionSkip = '';
       }
       if (completion !== null && completion !== undefined
         && settings.completionSessionId !== null && settings.completionSessionId === currentId
