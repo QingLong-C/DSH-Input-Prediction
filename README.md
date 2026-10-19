@@ -202,9 +202,12 @@ scripts/             冒烟测试与会话日志回放
 `_ops` / `_push` 是插件与宿主之间唯一的通道，改过的三个缺陷都长在通道语义上而不是业务逻辑
 上：`mutate()` 的第三个参数是「我读到的 revision」而不是「我要覆盖的版本」，被拒时看起来像
 写成功；zod schema 与 TS 联合类型是两份互不约束的真相，只改一边就静默丢载荷；单槽 last-wins
-快照装不下「只存在一瞬间」的载荷。另外两条更容易反复踩到：`apply(ctx, config)` 捕获的
+快照装不下「只存在一瞬间」的载荷。另外三条更容易反复踩到：`apply(ctx, config)` 捕获的
 volatile 引用会在首次配置写入后冻结，`settings/document-updated` 挂在插件自己的 `ctx` 上
-收不到。
+收不到，以及在它的回调里再发起任何 settings 写入都会被内核拒成 `HMR transactions cannot be
+nested`（ALS 事务沿 `await` 传播，推迟一个 tick 不算逃出）。文档里另有一节讲清留痕为什么只能
+走 stdout：`ctx.logger` 在健康进程里不落任何地方，运行期唯一可见面是 `console.log` 经宿主
+tee 进日志，所以本插件用语义标记 `[dsh-suggest-ghost][ops-trace]` 把留痕与调试噪声分开。
 
 见 [docs/internals-cordis-settings-pitfalls.md](docs/internals-cordis-settings-pitfalls.md)：
 每条按「症状 → 根因 → 正确用法 → 错误用法」写，附源码行号与 commit，并区分「已修」「待宿主

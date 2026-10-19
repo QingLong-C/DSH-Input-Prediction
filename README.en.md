@@ -182,9 +182,14 @@ from that channel's semantics, not from business logic: `mutate()`'s third argum
 revision I read" rather than "the value I want to overwrite", so a refused write can look like a
 successful one; a zod schema and a TS union are two separate truths, so adding an operation to only
 one of them drops payloads in silence; and a single-slot last-wins snapshot cannot carry a payload
-that exists for one moment, because the reader sees whatever was newest when it read. Two more that
+that exists for one moment, because the reader sees whatever was newest when it read. Three more that
 bite repeatedly: a volatile reference captured by `apply(ctx, config)` freezes after the first config
-write, and `settings/document-updated` never reaches the plugin's own `ctx`.
+write, `settings/document-updated` never reaches the plugin's own `ctx`, and any settings write issued
+from inside that event callback is refused as `HMR transactions cannot be nested` (the AsyncLocalStorage
+transaction survives `await`, so deferring by a tick does not escape it). A separate section there
+explains why traces have to go to stdout: `ctx.logger` writes nowhere in a healthy process, so the only
+runtime-visible channel is `console.log` tee'd into the host log, and this plugin tags those traces with
+`[dsh-suggest-ghost][ops-trace]` to keep them distinguishable from debug noise.
 
 [docs/internals-cordis-settings-pitfalls.md](docs/internals-cordis-settings-pitfalls.md) covers
 each as symptom, root cause, correct usage, wrong usage, with file:line and commit evidence. Every
