@@ -31,6 +31,16 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation';
 import type { Context } from '@deepseek-ai/cordis';
 import type { SuggestGhostProjection, SuggestGhostSuggested } from '../domain.ts';
 import { clearNormalizeCache, commonPrefixLength, extractHistory, historySuggestion, normalizeForMatch, stripCommandPrefix } from './history.ts';
+import {
+  acceptTarget,
+  buildFullAccept,
+  buildWordAccept,
+  commitDraftIfPristine,
+  readDraftSnapshot,
+  wordAcceptSettled,
+  wordMatchBase,
+  type DraftSnapshot,
+} from './accept-guard.ts';
 import { nextAcceptChunk } from './chunk.ts';
 import { keyCodeOf } from './keyspec.ts';
 import { SuggestGhostCard } from './settings-card.tsx';
@@ -45,6 +55,19 @@ import type { LocaleFaceLike } from './useGhostT.ts';
 interface ObservableSnapshot<T> {
   getSnapshot(): T;
   subscribe(listener: () => void): () => void;
+}
+
+/**
+ * 宿主输入机在本插件用到的最小面。
+ *
+ * `draftRev` 是 0.2.0-rc.2 起 `InputState` 对外发布的单调编辑器修订号
+ * （仅草稿投影变化时自增，纯光标移动不推进），采纳写入拿它做 CAS（#4）。
+ * 声明为可选：face 较旧或非 conversation 实现时读不到，accept-guard 会
+ * 退化为内容等值比对。
+ */
+interface InputFaceLike {
+  state: ObservableSnapshot<{ draft: string; draftRev?: number | undefined }>;
+  setDraft: (text: string) => void;
 }
 
 /**
@@ -754,10 +777,15 @@ function applyBody(ctx: Context): void {
   const cached = loadFromCache();
   let bound: {
     session: ObservableSnapshot<unknown>;
-    input: { state: ObservableSnapshot<{ draft: string }>; setDraft: (text: string) => void };
+    input: InputFaceLike;
     projectionFace: ObservableSnapshot<unknown>;
   } | null = null;
-  let shown: { key: string; content: GhostContent } | null = null;
+  /**
+   * 当前显示的幽灵。`base` 是**算出这份 content 时**所用的草稿快照
+   * （draft 文本 + 宿主 draftRev），两条采纳路径都以它为 CAS 基线：写入前
+   * 重读快照，与 base 不一致就说明用户在此期间又打了字，本次采纳放弃（#4）。
+   */
+  let shown: { key: string; content: GhostContent; base: DraftSnapshot } | null = null;
   /** IME 组词进行中（compositionstart~end 之间）：组合预览文本与幽灵后缀
    * 会叠在同一位置，必须抑制幽灵显示（Cursor/VSCode 同款处理）。 */
   let composing = false;
@@ -854,7 +882,7 @@ function applyBody(ctx: Context): void {
     lastSessionId = id;
     bound = {
       session: session as unknown as ObservableSnapshot<unknown>,
-      input: input as unknown as { state: ObservableSnapshot<{ draft: string }>; setDraft: (text: string) => void },
+      input: input as unknown as InputFaceLike,
       projectionFace: session.projections.faceOf(PROJECTION_KEY),
     };
     // 绑定成功即拉取该会话的权威状态（历史环 + 建议）：这是「会话就绪」的
@@ -863,25 +891,39 @@ function applyBody(ctx: Context): void {
     pullHistory(id);
   };
 
-  /** 计算当前应显示的幽灵内容（null = 不显示）。结果按 (draft, settingsEpoch, composing, running, currentId) 缓存。 */
-  const ghostContent = (currentId: string | undefined): { content: GhostContent | null; key: string | null } => {
+  /**
+   * 计算当前应显示的幽灵内容（null = 不显示）。结果按 (draft, settingsEpoch, composing, running, currentId) 缓存。
+   *
+   * 返回值里的 `base` 是**本次 content 所用**的草稿快照（与 `draft` 同源于
+   * 一次 `getSnapshot()`），采纳写入拿它做 CAS 基线（#4）。`content === null`
+   * 或输入机未绑定时为 null——那种形态下没有采纳可言。
+   */
+  const ghostContent = (currentId: string | undefined): {
+    content: GhostContent | null;
+    key: string | null;
+    base: DraftSnapshot | null;
+  } => {
     // 双模式禁用：直接返回，跳过快照读取（续写开启且有载荷时不能早退）
     if (!settings.historyEnabled && settings.suggestion === null
-      && (!settings.inlineEnabled || settings.completion === null)) return { content: null, key: null };
-    if (bound === null) return { content: null, key: null };
-    if (composing) return { content: null, key: null }; // IME 组词中：组合预览与幽灵后缀重叠，抑制显示
+      && (!settings.inlineEnabled || settings.completion === null)) return { content: null, key: null, base: null };
+    if (bound === null) return { content: null, key: null, base: null };
+    if (composing) return { content: null, key: null, base: null }; // IME 组词中：组合预览与幽灵后缀重叠，抑制显示
     // 0.1.2 会话快照只余 lifecycle 字段；本插件用到的仅剩 `running`。
     const snapshot = bound.session.getSnapshot() as { running: boolean };
-    const draft = bound.input.state.getSnapshot().draft;
+    // 一次读取同时取 draft 与 draftRev：CAS 的两个量必须来自同一帧快照，
+    // 分两次读会让「文本」与「版本」错配。
+    const base = readDraftSnapshot(bound.input.state.getSnapshot());
+    const draft = base.draft;
 
     // 缓存命中：所有输入维度未变 → 直接返回上次结果，跳过全部归一化与打分。
+    // 命中的前提是 draft 逐字相同，故缓存结果与新鲜 base 仍指同一份草稿。
     if (ghostContentCache !== null
       && ghostContentCache.draft === draft
       && ghostContentCache.settingsEpoch === settingsEpoch
       && ghostContentCache.composing === composing
       && ghostContentCache.running === snapshot.running
       && ghostContentCache.currentId === currentId) {
-      return { content: ghostContentCache.result, key: ghostContentCache.key };
+      return { content: ghostContentCache.result, key: ghostContentCache.key, base };
     }
 
     const result = computeGhostContent(draft, snapshot, currentId);
@@ -896,7 +938,7 @@ function applyBody(ctx: Context): void {
 
     // 写入缓存（composing 已在函数入口早退，此处必为 false）。
     ghostContentCache = { draft, settingsEpoch, composing: false, running: snapshot.running, currentId, result, key };
-    return { content: result, key };
+    return { content: result, key, base };
   };
 
   /** ghostContent 的实际计算（无缓存层）。 */
@@ -984,8 +1026,9 @@ function applyBody(ctx: Context): void {
     // inlineDelayMs 才真正发送 complete op。
     scheduleInlineTrigger();
     retryPendingPull();
-    const { content, key } = ghostContent(currentId);
-    if (content === null) {
+    const { content, key, base } = ghostContent(currentId);
+    // base 与 content 同源：content 非 null 时 base 必非 null（同一帧快照读出）。
+    if (content === null || base === null) {
       if (shown !== null) {
         overlay.hide();
         shown = null;
@@ -1031,7 +1074,7 @@ function applyBody(ctx: Context): void {
     cachedComposer = composer;
     overlay.attach(composer);
     overlay.show(content);
-    shown = { key, content };
+    shown = { key, content, base };
   };
 
   // 读取/订阅设置命名空间（可选服务；缺失时保持默认并继续幽灵逻辑）。
@@ -1318,6 +1361,8 @@ function applyBody(ctx: Context): void {
       && !(focused instanceof HTMLElement && focused.isContentEditable)) return;
     if (!isComposerTarget(focused)) return;
     const content = shown.content;
+    // CAS 基线：这份 content **计算时**所用的草稿快照（文本 + 宿主 draftRev）。
+    const base = shown.base;
     const acceptKey = content.kind === 'llm' ? content.acceptKey : DEFAULT_ACCEPT_KEY;
     const matcher = parseAcceptKey(acceptKey);
     if (matcher !== undefined && matcher(event)) {
@@ -1329,26 +1374,22 @@ function applyBody(ctx: Context): void {
         // 里的「内容」部分（命令 `recordInput:false`，不含命令名+参数）。
         // 此时采纳必须把命令前缀一并回填，否则用户命令意图被破坏——只剩
         // 内容部分，需要重新键入 `/later +3m ` 才能执行。
-        let accepted: string;
-        if (content.kind === 'llm') {
-          accepted = content.text;
-        } else if (content.kind === 'inline') {
-          // 停顿续写：prefix 即显示时刻的草稿原样，采纳直接拼 full（draft+text）。
-          // 命令整行草稿（/later …）的续写 full 本就含命令前缀，无需回填。
-          accepted = content.full;
-        } else {
-          const draftNow = bound.input.state.getSnapshot().draft;
-          const contentDraft = stripCommandPrefix(draftNow);
-          // 命令整行：contentDraft 是「内容部分」，它不包含命令名+参数。
-          // 还原时把 draftNow 头部到 contentDraft 之前的那段（含命令名、
-          // 时间参数、以及它们之间的空白）一并保留，再接 content.full。
-          const head = contentDraft === ''
-            ? draftNow
-            : draftNow.slice(0, draftNow.length - contentDraft.length);
-          const tailJoiner = head.endsWith(' ') || head === '' ? '' : ' ';
-          accepted = `${head}${tailJoiner}${content.full}`;
+        //
+        // 读-改-写竞态（Gitea #4）：accepted 完全由 base.draft 推导，故写入前
+        // 重读宿主快照并与 base 比对（有 draftRev 按版本号，没有则退化为内容
+        // 等值，判据见 accept-guard.ts）。一旦漂移，说明用户在这两步之间又打
+        // 了字——本次采纳**整段放弃**，一个字符都不写，新输入原样留在草稿里；
+        // 幽灵照旧收掉（下一次 render 会按新草稿重新出建议）。
+        const accepted = buildFullAccept(content, base.draft);
+        const input = bound.input;
+        const outcome = commitDraftIfPristine(
+          base,
+          readDraftSnapshot(input.state.getSnapshot()),
+          () => { input.setDraft(accepted); },
+        );
+        if (!outcome.committed) {
+          console.log(`[suggest-ghost] full-accept abandoned: reason=${outcome.reason}, baseRev=${base.rev}, baseDraft=${JSON.stringify(base.draft.slice(0, 24))}`);
         }
-        bound.input.setDraft(accepted);
       }
       overlay.hide();
       shown = null;
@@ -1364,34 +1405,34 @@ function applyBody(ctx: Context): void {
       && event.code === 'ArrowRight'
       && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
       const ta = focused;
-      const draftNow = bound !== null ? bound.input.state.getSnapshot().draft : '';
-      const full = content.kind === 'llm' ? content.text : content.full;
+      const full = acceptTarget(content);
       // 光标必须在草稿末尾：textarea 用 selectionStart/End，contenteditable
       // 用 Selection API（caretAtComposerEnd 统一两代）。
       if (!caretAtComposerEnd(ta)) return;
-      const matchBase = content.kind === 'history'
-        ? stripCommandPrefix(draftNow)
-        : draftNow;
+      const matchBase = wordMatchBase(content, base.draft);
       if (!full.startsWith(matchBase) || matchBase.length >= full.length) return;
       const chunk = nextAcceptChunk(full.slice(matchBase.length));
       if (chunk === '') return;
       event.preventDefault();
       event.stopPropagation();
-      let accepted: string;
-      if (content.kind === 'history') {
-        // 命令整行：draftNow 头部到 matchBase 之前是命令前缀段（含时间参数），
-        // 需要随逐词采纳保留。
-        const head = matchBase === ''
-          ? draftNow
-          : draftNow.slice(0, draftNow.length - matchBase.length);
-        const tailJoiner = head.endsWith(' ') || head === '' ? '' : ' ';
-        accepted = `${head}${tailJoiner}${matchBase}${chunk}`;
-      } else {
-        accepted = draftNow + chunk;
+      const accepted = buildWordAccept(content, base.draft, matchBase, chunk);
+      if (bound !== null) {
+        // 与整条采纳同一条 CAS 判据（#4）：草稿在计算与写入之间被改过就放弃，
+        // 不写任何字符，并收掉幽灵。
+        const input = bound.input;
+        const outcome = commitDraftIfPristine(
+          base,
+          readDraftSnapshot(input.state.getSnapshot()),
+          () => { input.setDraft(accepted); },
+        );
+        if (!outcome.committed) {
+          console.log(`[suggest-ghost] word-accept abandoned: reason=${outcome.reason}, baseRev=${base.rev}, baseDraft=${JSON.stringify(base.draft.slice(0, 24))}`);
+          overlay.hide();
+          shown = null;
+          return;
+        }
       }
-      if (bound !== null) bound.input.setDraft(accepted);
-      if (accepted === full || (content.kind === 'history'
-        && accepted.endsWith(full))) {
+      if (wordAcceptSettled(content, accepted)) {
         overlay.hide();
         shown = null;
       }
