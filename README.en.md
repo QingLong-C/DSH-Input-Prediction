@@ -237,6 +237,51 @@ Order of work, so a fix is not lost between editing and verifying:
 4. Only then ask for a restart. Never verify uncommitted work: concurrent sessions and external tools
    write to this working tree without warning, and committed content is the only thing that comes back.
 
+### Applying host-side changes without a restart
+
+After editing `src/index.ts` and running `node build.mjs`, the default configuration needs a host
+restart. That is a profile setting, not a platform limit: `@deepseek-ai/dsh-hmr` reloads plugin
+source, but this profile composes it as `config: { root: [] }`, and its README says an empty `root`
+keeps "only explicit configuration watches", i.e. the profile's config files only.
+
+A second reason is the one developers trip over: the default `ignored` is
+`["**/node_modules", "**/.*", "cache", "data"]`, and during development this plugin lives at
+`profiles/web/node_modules/dsh-suggest-ghost` (a `link:` dependency). **Even `root: ["."]` would
+not watch it**, because the ignore pattern excludes that path.
+
+To watch it, append this to the profile's `cordis.patch.yml` (keep `root` narrow so Chokidar does
+not walk all of node_modules):
+
+```yaml
+- id: hmr
+  disabled: false
+  config:
+    root:
+      - node_modules/dsh-suggest-ghost/lib
+    ignored: []
+    debounce: 100
+```
+
+Validate the overlay without booting: `dsh --profile web --patch <file> --dump-config`, then check
+that `id: hmr` carries those three keys and no other entry changed.
+
+Once it is on, the log tells you whether a reload happened, so you never verify stale bytecode
+again. Every mount prints one line:
+
+```
+[dsh-suggest-ghost][ops-trace] apply called; artifact mtime=<mtime of the loaded lib/index.js>
+```
+
+`touch lib/index.js`, then look for that line again. A new mtime means the new build is in memory;
+an unchanged mtime means the process is still running the previous bytes, so whatever the
+verification shows is not about your change. Client-side work needs no host restart at all: the
+browser module graph is loaded separately, so a page refresh is enough.
+
+> Limitation: reloads run inside the kernel's `runExclusive` transaction, so settings writes the
+> plugin issues from an event callback are refused during reload as well (pitfall 1.5 in
+> `docs/internals-cordis-settings-pitfalls.md`). A failed `_ops` clear right after a reload is
+> expected; judge the reload by the `apply called` mtime, not by that failure.
+
 ### Cold-start semantics (why it works right after a restart)
 
 "No data after a restart" is a misreading: **history lives in the session log, and the host re-sends the suggestion after checking it semantically.**

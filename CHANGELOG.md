@@ -78,6 +78,16 @@ All notable changes to this project will be documented in this file.
   去重回到它本来的职责。`scripts/ops-envelope-smoke.mjs` 断言不变量，并断言新增顶层键不会被宿主
   拒（`opsPayloadSchema` 非 strict；反向验过未知 op 仍被拒，判据不是永真）
 
+### 开发工具
+
+- README 中英版各加一节「宿主层改动怎么不重启就生效」：本 profile 把 `hmr.config.root` 合成成
+  `[]`（只监听配置文件），而默认 `ignored` 里的 `**/node_modules` 又把 `link:` 形态的本插件排除掉，
+  两层原因叠起来才造成「改宿主代码必须重启」。附可直接用的 `root/ignored/debounce` 片段、
+  `--patch … --dump-config` 的免启动校验法，以及判据：`apply called; artifact mtime=…`
+- `src/index.ts` 里「volatile 字段不落盘，故内存里没有跨进程残留」这条断言**是错的**，已按观测更正：
+  `_ops`/`_push` 实际写在 profile 文档里，且一个复制该 profile 的新实例在没有任何客户端连接时就
+  重放了遗留 `complete` 载荷。连带说明「消费后清空」为何长期失败、代价是什么
+
 ### 已知缺口
 
 - #17 要求「schema 拒绝路径必须留痕」，那行日志（`parseHotnessOps` 打印 issues 摘要）已随 main 的

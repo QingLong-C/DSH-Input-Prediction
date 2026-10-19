@@ -445,12 +445,22 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       liveSettings.invalidate();
       effective();
       // 重启/重载对账：`_push` 是建议（不可重建的 LLM 输出）唯一的持久载体。
-      // volatile 字段不落盘（内核用同一判据把它从 profile 文档里剔除），故
-      // 内存里没有跨进程残留——这里只需消化启动前 client 抢跑写入的 `_ops`。
+      //
+      // ⚠️ 本函数原先在此处断言「volatile 字段不落盘，故内存里没有跨进程残留」，
+      // 该断言**是错的**，两条观测都能反证：
+      //  - `_ops` / `_push` 实际写在 profile 文档里（本机 `/home/wujue/.dsh/profiles/web/cordis.patch.yml`
+      //    里就有 `_ops: '{"rev":28,...}'` 与 `_push: '{"rev":268,...}'` 两行）；
+      //  - 用一个复制了该 profile 的新实例做隔离验证时，它在**还没有任何客户端连上来**
+      //    的情况下就打印了 `ops consumed: complete ... draftChars=12`，即启动就重放了
+      //    上一个进程遗留的载荷（`_ops clear failed` 紧随其后）。
+      // 遗留载荷能长期留在盘上的原因是「消费后清空」在 settings 事件回调里被内核按
+      // `HMR transactions cannot be nested` 结构性拒绝（实测一个进程 372/373 次失败），
+      // 于是去重只剩进程内的 lastOpsPayload 守卫，而它每次启动都归零。
       //
       // `_ops` 遗留补消费：client 冷启动的 pull 若抢跑在本注入之前，那次写入
-      // 已被错过。消费幂等（热度 ops 幂等、消费后立即清空），先跑一次关掉这个
-      // 时序窗口。
+      // 已被错过，这里补一次关掉那个时序窗口。热度 ops 是幂等的；但 `complete`
+      // 的补消费会**为旧草稿重新生成一次续写**，那是上面那条结构性失败带来的代价
+      // （修法见 issue #16 的跟进：载荷自带 seq + 把清空挪到事务外）。
       lastOpsPayload = readOps();
       consumeOps(parseHotnessOps(lastOpsPayload), svc);
       // 热度恢复是异步的（storageDomain.open）：恢复完成后补推一次快照，修正

@@ -252,6 +252,48 @@ node scripts/gitignore-check.mjs      # 有没有「已跟踪却被 ignore 覆�
 4. 再请求重启。未提交的改动不要拿去验证：并发会话或其他工具对工作区的写入是不可预期的，
    提交过的内容才追得回来。
 
+### 宿主层改动怎么不重启就生效
+
+改 `src/index.ts` → `node build.mjs` 之后，**默认配置下要重启宿主才生效**，但这是
+profile 配置的结果，不是平台限制。DSH 自带插件热重载（`@deepseek-ai/dsh-hmr`），本 profile
+没开它的源码监听：合成配置里那个条目是 `config: { root: [] }`，而它的 README 写明
+`root` 为 `[]` 时「只保留 explicit configuration watches」，即只监听 profile 的配置文件。
+
+第二层原因更容易踩：默认 `ignored` 是
+`["**/node_modules", "**/.*", "cache", "data"]`，而开发期的本插件是以
+`link:` 形式挂在 `profiles/web/node_modules/dsh-suggest-ghost` 下的。所以**即便把 `root`
+配成 `["."]`，默认 ignore 规则也照样把它排除在监听之外**。
+
+要开监听，在 profile 的 `cordis.patch.yml` 末尾加一段（`root` 收窄到本插件产物目录，
+别让 chokidar 去遍历整个 node_modules）：
+
+```yaml
+- id: hmr
+  disabled: false
+  config:
+    root:
+      - node_modules/dsh-suggest-ghost/lib
+    ignored: []
+    debounce: 100
+```
+
+这段的合法性可以先不启动就验：`dsh --profile web --patch <这个文件> --dump-config`，
+对照 `id: hmr` 是否带上这三项、其余条目行数不变。
+
+开起来之后的判据就在日志里，不用猜：本插件每次挂载都打一行
+
+```
+[dsh-suggest-ghost][ops-trace] apply called; artifact mtime=<那份 lib/index.js 的 mtime>
+```
+
+`touch lib/index.js` 后再看这一行：mtime 变了就说明热重载把新构建换进来了；mtime 不变
+就说明还在旧字节码上，此时无论验证结果如何都不作数（这正是 issue #20 那类白跑一轮）。
+客户端侧不需要宿主重启：browser 侧有独立的模块加载机制，刷新页面即可。
+
+> 限制：`hmr/change` 的重载走内核的 `runExclusive` 事务，因此**重载期间**插件在事件回调里
+> 发起的 settings 写入同样会被拒（`docs/internals-cordis-settings-pitfalls.md` 陷阱 1.5）。
+> 重载后第一次 `_ops` 清空失败属预期，不代表改动没生效，判据是 `apply called` 那行的 mtime。
+
 ### 冷启动语义（重启后为何立即可用）
 
 重启后「没有数据」并非真的没数据：**历史在会话日志里，建议由 host 按语义校验后重推**。
