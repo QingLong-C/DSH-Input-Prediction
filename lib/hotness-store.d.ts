@@ -56,13 +56,71 @@ export declare function setupHotnessPersistence(ctx: Context): {
     hotness: HotnessTable;
     persistence: HotnessPersistence;
 };
-/** `_ops` 解析结果：操作批 + 可选的 UI 语言。 */
+/**
+ * `_ops` 载荷被丢弃的原因（`parseHotnessOps` 的留痕载荷）。
+ *
+ * **为什么用返回值而不是日志回调**：`parseHotnessOps` 是纯函数（无 ctx、无 I/O），
+ * 它跑在 host 的 settings 事件回调里，也在 smoke 里被直接驱动。留痕走两条完全不同的
+ * 通道（host 要 `ctx.logger.warn`、smoke 要断言「未知 op 被拒且有留痕」），所以这里
+ * 把**原因作为数据返回**，由调用方决定怎么落地：
+ *  - `index.ts` 的 `consumeOps` 统一打印（两个调用点共用同一个消费者，漏打印的可能
+ *    性只存在于一个函数里，新增第三个调用点也自动带上留痕）；
+ *  - `scripts/ops-schema-coverage-smoke.mjs` 直接断言这个字段。
+ * 传回调（`onReject`）也能work，但它把「打什么级别」这个决策塞进了纯函数，且 smoke
+ * 要造假 ctx 才能观察；返回数据两者都不付。
+ */
+export interface OpsRejectInfo {
+    /** `json` = 载荷不是合法 JSON；`schema` = JSON 合法但被 `opsPayloadSchema` 整批拒绝。 */
+    readonly kind: 'json' | 'schema';
+    /** 可直接进日志的单行摘要（已截断，含 zod issues——#17 的直接教训）。 */
+    readonly summary: string;
+    /** 载荷字节数（判断是不是被截断/塞了巨载荷；不含正文，避免把用户草稿抄进日志）。 */
+    readonly bytes: number;
+}
+/**
+ * schema 侧实际放行的 op 变体清单（`hotnessSchemaVariants` 的返回元素）。
+ */
+export interface OpsSchemaVariant {
+    /** 判别式字面量（`op` 的取值）。 */
+    readonly op: string;
+    /** 必填的其余字段名（不含 `op`）。 */
+    readonly required: readonly string[];
+    /** 可选的其余字段名。 */
+    readonly optional: readonly string[];
+}
+/**
+ * 从 `opsPayloadSchema` **现推导**「schema 这一侧认得哪些 op 变体、各自要求哪些字段」。
+ *
+ * 存在的唯一理由：#17 是「`domain.ts` 的 TS 类型有 `complete`、schema 没有」这种
+ * 两份真相互不约束的漂移，而编译器不会报错。漂移断言（`scripts/ops-schema-coverage-smoke.mjs`）
+ * 要拿这一侧的清单去和 TS 那一侧比，所以这份清单**必须**从真正在跑的 schema 推导，
+ * 不能手抄——手抄的名单自己就会变成第三份会漂移的真相。
+ *
+ * 推导失败（zod 换大版本、`discriminatedUnion` 内部形状变了）时**直接抛**：
+ * 静默返回空数组会让漂移断言「全都对」，那比没有断言更坏。
+ */
+export declare function hotnessSchemaVariants(): readonly OpsSchemaVariant[];
+/** `_ops` 解析结果：操作批 + 可选的 UI 语言 + 可选的丢弃原因。 */
 export interface ParsedOpsResult {
     readonly ops: readonly HotnessOp[];
     readonly locale?: string;
+    /** 有值 = 这份载荷被整批丢弃了，**调用方必须留痕**（空载荷不算，见下）。 */
+    readonly rejected?: OpsRejectInfo;
 }
 /**
  * 解析 client 写入 `_ops` 的 JSON 载荷：非法/空载荷返回空结果（调用方据此
  * 跳过消费）。上限防御：单批操作数最多 1000（防畸形巨载荷拖住写链）。
+ *
+ * **三条返回空 ops 的路径语义不同，留痕也不同**（Gitea #17 的教训：载荷被整批
+ * 拒了却毫无线索）：
+ *  1. 空载荷（`undefined` / `''` / `'null'`）：**正常态**，不是丢弃。host 每次消费
+ *     完都把 `_ops` 写回空值，`document-updated` 必然再读到它，所以这里不打日志
+ *     （打了就是每次推送一条噪声）。
+ *  2. JSON 解析失败 → `rejected.kind = 'json'`，必须留痕。
+ *  3. zod 拒绝 → `rejected.kind = 'schema'`，必须留痕并带 issues 摘要（整批丢弃的
+ *     原因只有 issues 能说清）。
+ * 2/3 由调用方（`index.ts` 的 `consumeOps`）经 `ctx.logger.warn` 打印——不用
+ * console.log：main 的 `6dfcd78`（chore: remove all debug console.log statements）
+ * 正是把 console 当调试噪声清掉的那次；走 logger 的留痕不会被下一轮清理顺手删。
  */
 export declare function parseHotnessOps(raw: string | undefined): ParsedOpsResult;
