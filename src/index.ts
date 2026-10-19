@@ -230,7 +230,6 @@ function lastSuggestedTurnInLog(session: Session): number {
  * @param config - 必填的有界生成策略。
  */
 export function apply(ctx: Context, config: GenerateConfig): void {
-  ctx.logger.info('dsh-suggest-ghost: apply() called, starting plugin initialization...');
   const resolved = resolveConfig(config);
   const states = new WeakMap<Session, SessionState>();
   const tracked = new Set<SessionState>();
@@ -362,7 +361,6 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     return typeof payload === 'string' ? payload : EMPTY_PUSH;
   };
   ctx.inject(['settings'], (settingsCtx) => {
-    ctx.logger.info('dsh-suggest-ghost: settings inject callback called');
     try {
       const svc = (settingsCtx as { settings?: { update: (ns: unknown, patch: object) => Promise<void> } }).settings;
       if (svc === undefined) {
@@ -409,7 +407,6 @@ export function apply(ctx: Context, config: GenerateConfig): void {
         lastOpsPayload = payload;
         consumeOps(parseHotnessOps(payload), svc);
       });
-      ctx.logger.info('dsh-suggest-ghost: settings wired (volatile config, ns=suggest-ghost)');
     } catch (error) {
       ctx.logger.warn(`dsh-suggest-ghost: settings wiring failed: ${String(error)}`);
     }
@@ -767,18 +764,15 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     if (ops.length === 0) return;
     for (const op of ops) {
       if (op.op === 'pull') {
-        ctx.logger.info(`dsh-suggest-ghost: consumeOps pull, sessionId = ${op.sessionId}`);
         // 无论历史环可不可得都应答：环缺失（会话尚未进店/已销毁）时 statePushOf
         // 会省略 history（client 保留现值），但热度与对账后的建议照常送达——
         // 静默丢弃会让 client 永远等不到这一轮对账。
         pushToClient(statePushOf(op.sessionId));
       } else if (op.op === 'complete') {
-        ctx.logger.info(`dsh-suggest-ghost: consumeOps complete, sessionId = ${op.sessionId}, draft = ${JSON.stringify(op.draft)}`);
         handleComplete(op.sessionId, op.draft);
       }
     }
     const changed = persistence.applyOps(ops);
-    if (changed > 0) ctx.logger.info(`dsh-suggest-ghost: hotness ops applied (${changed} changed)`);
     void persistence.flush();
     // 消费完成：清空操作队列（下一次 watch 触发时 ops 为空，直接跳过）。
     void svc.update(SUGGEST_GHOST_NAMESPACE, { _ops: EMPTY_PUSH }).then(
@@ -933,5 +927,4 @@ export function apply(ctx: Context, config: GenerateConfig): void {
       });
     }
   });
-  ctx.logger.info('dsh-suggest-ghost: apply() completed successfully');
 }

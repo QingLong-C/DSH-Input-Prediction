@@ -176,9 +176,6 @@ export function setupHotnessPersistence(ctx: Context): {
         entries = table;
         domain = opened;
         ready = true;
-        ctx.logger.info(
-          `dsh-suggest-ghost: hotness persistence ready (${records.length} records restored, table size ${hotness.size})`,
-        );
         // 卸载兜底挂在注入派生 fiber 上：storageDomain 卸载或插件卸载都会触发。
         ctx.effect(() => () => void close());
         void flush(); // 补写 open 窗口期累积的 live 记账与恢复合并值
