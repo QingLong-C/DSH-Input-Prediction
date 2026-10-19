@@ -106,6 +106,7 @@ export function unwrapMutateResult(response: unknown): MutateOutcome {
               : error instanceof Error
                 ? error.message
                 : undefined,
+          view: undefined,
         };
       }
       node = record.value;

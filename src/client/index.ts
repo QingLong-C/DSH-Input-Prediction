@@ -62,6 +62,7 @@ import {
   settleWriteVerdict,
   unwrapMutateResult,
   verdictFromView,
+  type WriteVerdict,
 } from './settings-result.ts';
 import { SuggestGhostCard } from './settings-card.tsx';
 import type { PluginSettingsScope } from './settings-scope.ts';
@@ -1253,29 +1254,6 @@ function applyBody(ctx: Context): void {
         `[suggest-ghost] _ops write ${String(verdict)}: expectedRevision=${rev}, `
         + `code=${String(outcome.code)}, message=${String(outcome.message).slice(0, 120)}, `
         + `revisionAfter=${String(view?.revision)}, _opsAfter=${JSON.stringify(view?.value).slice(0, 40)}`,
-      );
-      return Promise.resolve(false);
-    };
-
-    /** 兜底的一次性读回（仅用于「远程面没带回可判别的写后视图」这一少见分支）。 */
-    const readBackOnce = (rev: number, sent: string): Promise<boolean> =>
-      svc
-        .describe()
-        .then((described) => {
-          const row = (unwrapSettingsDoc(described)?.namespaces ?? []).find((r) => r.ns === SETTINGS_NAMESPACE) as
-            | { revision?: number; value?: Record<string, unknown> }
-            | undefined;
-          if (row?.value?._ops === sent) return true;
-          // 同 settleWrite 判据 2：取「动了」而不是「变大了」，host 重启会让计数回 0。
-          return typeof row?.revision === 'number' && row.revision !== rev;
-        })
-        .catch(() => false);
-
-    /** 「写了但拿不到落盘证据」的留痕：区分「被拒」与「没到达内核」（#16 的第一步）。 */
-    const reportUnsettled = (rev: number, after?: number, landedValue?: unknown): Promise<false> => {
-      console.warn(
-        `[suggest-ghost] _ops write unsettled: expectedRevision=${rev}, `
-        + `revisionAfter=${String(after)}, _opsAfter=${String(landedValue).slice(0, 48)}`,
       );
       return Promise.resolve(false);
     };
