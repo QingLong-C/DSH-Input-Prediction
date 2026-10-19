@@ -53,6 +53,18 @@ All notable changes to this project will be documented in this file.
 - 新增 `docs/upstream-feedback-settings-proxy.md`：#16 遗留思考的上游反馈草稿，**尚未提交给内核维护者**
 - README.md / README.en.md 的「开发」章节各加一节「改双向 settings 通道前必读」，指向上面两篇文档
 
+### 开发工具
+
+- 新增 `scripts/artifact-freshness.mjs`：报告 `lib/` 是否比 `src/` 旧（2s 容差，避开 checkout 的
+  毫秒级假阳性），以及 `<profile>/node_modules/dsh-suggest-ghost` 这条部署符号链接解析到哪个工作副本。
+  多 worktree 并行时，只有链接指向的那一份会被宿主加载
+- 新增 `scripts/gitignore-check.mjs`：查出「已被跟踪、但被 ignore 规则覆盖」的目录。这类目录里的新文件
+  从此不进索引：文件在盘上、构建照常、`git status` 干净，而 `git checkout` 恢复不出来。判据用
+  `git check-ignore --no-index`，缺 `--no-index` 时 git 会跳过已跟踪路径、恰好查不到这种状态
+- 新增 `pnpm run check:loop`（两条体检一起跑）；`scripts/dev-loop-smoke.mjs` 用一次性 git 仓库断言
+  上述判据，含「新文件 add 不进去」这条事故机制本身
+- README.md / README.en.md 的「开发」章节各加一节，写清宿主加载哪份副本、以及改动到重启之间的落盘顺序
+
 ### 已知缺口
 
 - #17 要求「schema 拒绝路径必须留痕」，那行日志（`parseHotnessOps` 打印 issues 摘要）已随 main 的

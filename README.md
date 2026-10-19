@@ -210,6 +210,45 @@ volatile 引用会在首次配置写入后冻结，`settings/document-updated` �
 每条按「症状 → 根因 → 正确用法 → 错误用法」写，附源码行号与 commit，并区分「已修」「待宿主
 验证」「内核契约」「仅本插件经验」四档确定性，文末是改动前后的复查清单。
 
+### 改代码前：哪份副本会被宿主加载
+
+**结论：宿主加载的是 `<profile>/node_modules/dsh-suggest-ghost` 这条符号链接解析到的工作副本，
+不是你正在编辑的那一个。** 本机现状：
+
+```
+~/.dsh/profiles/web/node_modules/dsh-suggest-ghost
+  -> /home/wujue/workspace/dsh-plugins/dsh-suggest-ghost
+```
+
+配套事实有两条，都会决定一轮验证算不算白跑：
+
+- 本仓 `lib/` **纳入版本管理**，宿主 `import('dsh-suggest-ghost')` 加载的是 `lib/index.js`
+  （`package.json` 的 `main`）与 `lib/client.js`（`exports["./client"]`）。`src/*.ts` 只是源，
+  改完 `src/` 不重建就请求重启，加载的仍是旧字节码。
+- 仓库可能同时存在多个 git worktree（并行修多个 issue 时必然如此），链接只指向其中一个。
+  在别的副本里改、构建、重启，都不会生效。
+
+开工前跑这两条，都是只读的：
+
+```bash
+node scripts/artifact-freshness.mjs   # lib 是否比 src 旧（2s 容差）；部署链接指向哪个副本
+node scripts/gitignore-check.mjs      # 有没有「已跟踪却被 ignore 覆盖」的目录，fatal 退出码非 0
+```
+
+`gitignore-check` 挡的是一类静默失效：`lib/` 必须入库，所以一条盖住它的规则（`.gitignore` 里的
+`build/`、`lib/`、`src/` 之类，或 `~/.config/git/ignore` 里的全局规则）会让**该目录下新建的文件
+从此不进索引**。文件在盘上、构建照常、`git status` 一片干净，而 `git checkout` 恢复不出它们，
+因为 git 从来不知道它们存在。这条判据本身有个易踩的坑：`git check-ignore` 默认**跳过已跟踪路径**，
+必须加 `--no-index`，否则恰好查不到这种状态。
+
+改动落盘与验证的顺序（本仓多次因为跳过后半程返工）：
+
+1. 在你的 worktree 里改完，跑 `pnpm run test:smoke`（全绿再动下一步）；
+2. `node build.mjs` 重建 `lib/`，把 `src/` 与 `lib/` **一起提交**；
+3. `node scripts/artifact-freshness.mjs` 确认产物不陈旧、且指向的副本就是你要宿主加载的那份；
+4. 再请求重启。未提交的改动不要拿去验证：并发会话或其他工具对工作区的写入是不可预期的，
+   提交过的内容才追得回来。
+
 ### 冷启动语义（重启后为何立即可用）
 
 重启后「没有数据」并非真的没数据：**历史在会话日志里，建议由 host 按语义校验后重推**。
