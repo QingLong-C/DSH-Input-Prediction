@@ -216,11 +216,5 @@ export declare const Config: z<Schemastery.TypeS<typeof ConfigSchema>, PluginCon
 export declare const inject: string[];
 /** 插件名（与 cordis 条目 id 及 manifest 一致）。 */
 export declare const name = "dsh-suggest-ghost";
-/**
- * 挂载插件：监听完成回合、按会话生成建议、注册投影单元，并把配置暴露
- * 到 WebUI 设置页（settings 命名空间，live 生效）。
- * @param ctx - 提供 LLM 与会话服务的 cordis 上下文。
- * @param config - 必填的有界生成策略。
- */
 export declare function apply(ctx: Context, config: GenerateConfig): void;
 export {};
