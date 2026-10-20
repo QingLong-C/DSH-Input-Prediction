@@ -14,10 +14,11 @@
 
 ## What it is
 
-A pure plugin mount (host listens to turn events + client-side DOM overlay) — no changes to any DSH core code. Two modes switch automatically:
+A pure plugin mount (host listens to turn events + client-side DOM overlay) — no changes to any DSH core code. Three modes switch automatically:
 
 - **LLM next-suggestion** (empty draft): after every completed turn, the last round of conversation is sanitized and sent to the suggestion model (inherits the main request route by default, no extra config) to produce "the sentence you are most likely to type next" — the same experience as Claude Code.
-- **History prefix completion** (non-empty draft): zsh-autosuggestions style — finds prefix-matching entries in conversation history, scores by recency first, with in-session frequency and cross-session hotness as secondary signals, and renders the remaining part in gray. Full/half-width punctuation, whitespace, and case differences do not affect matching.
+- **History prefix completion** (non-empty draft): zsh-autosuggestions style — finds prefix-matching entries in conversation history, scores by recency first, with in-session frequency and cross-session hotness as secondary signals, and renders the remaining part in gray. Full/half-width punctuation, whitespace, and case differences do not affect matching. Immediate, no network.
+- **Pause completion** (non-empty draft): once typing pauses for `inlineDelayMs` (default 800ms) a completion request goes out and the rest of the sentence appears as ghost text at the caret; Tab accepts the whole thing, `→` accepts word by word. **Latency expectation**: 800ms only decides *when the request is sent*; the model itself measured **19-28s** in an isolated instance (18971 / 24217 / 27793ms, 2026-10-20), so waiting a few seconds after pausing will usually show nothing. Typing again aborts the in-flight request and restarts it; every such outcome is visible in the host log (`completion-preempted` / `completion-aborted` / `completion-timeout`).
 
 Ghost text is rendered as a DOM overlay approximation (follows the input's font and scroll), not depending on the official `setGhost` input capability, so it works on rc.6; keystrokes are not intercepted during IME composition.
 

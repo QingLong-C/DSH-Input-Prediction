@@ -30,7 +30,7 @@
 /**
  * 续写整条调用链的**墙钟上界**（毫秒）。
  *
- * 为什么 `generateCompletion` 内部已有的 `deadline(signal, config.timeoutMs, …)` 不算数：
+ * ## 为什么 `generateCompletion` 内部已有的 `deadline(signal, config.timeoutMs, …)` 不算数
  * `deadline()` 只**通知**（abort 那个 signal），终止动作仍归调用方。若 provider 的异步
  * 迭代器一个 chunk 都不吐、`next()` 永不返回，`for await` 就卡在 `next()` 上，循环体里
  * 那句 `throwIfAborted()` 永远执行不到 —— 于是 `generateCompletion` 这个 promise
@@ -38,23 +38,40 @@
  * 不出东西」，日志里是「什么都没有」。这正是本次故障的第三种不可区分情况。
  * 所以必须有一道**从外部把 promise 判死**的上界，而不是又一个只会通知的 signal。
  *
- * 取值依据（算术写在明处，方便后来人重算）：
- *  - 实测成功耗时 1.5 ~ 7s ⇒ 正常生成有 ~2.9 倍余量；
- *  - `generateCompletion` 自带 maxAttempts=2 + 800ms 退避 ⇒ 一次完整的合法重试是
- *    「attempt1 + 800ms + attempt2」；7s 的最坏实测两次重试 ≈ 14.8s，仍在上界内，
- *    **不会误杀正常重试**；
- *  - 大上下文会话显著更久：单 attempt 到 14s 时，两次重试 ≈ 28.8s 才会撞上界，
- *    也就是允许每条 attempt 比最坏实测慢一倍；
- *  - 再慢就没意义了：续写只对「此刻这份草稿」有效，20s 后用户早就改了草稿，
- *    结果即便到达也会被出口 4（被抢先）丢掉。上界的价值是**释放 pending 并留痕**，
- *    不是等一个迟到的答案。
+ * ## 取值依据：真实宿主的实测分布，不是快样本的算术
+ * 上一版这里写的是「实测 1.5~7s，两次重试 ≈14.8s，所以取 20s」，那是照着最快的样本推的，
+ * 而**真宿主直接把一次合法生成判死了**。隔离沙箱（同一台机器、同一 provider、模型
+ * Qwen3.8-Flash、同一个会话）实测 `completion generated … in Nms`：
+ *  - `chars=39  in 18971ms`
+ *  - `chars=132 in 24217ms`
+ *  - `chars=109 in 27793ms`
+ *  - 以及一次 `completion timeout: no settle within 20000ms … after 20001ms` —— 那就是
+ *    被 20s 界**误杀**的那次：它完全可能在 20s 之后正常返回。
+ * 三点结论：① 合法时长在 19~28s，比「1.5~7s」那个说法慢一个量级；② 它与输出字数**不**
+ * 成正比（132 字比 109 字还快），说明固定开销（建转录、首令牌延迟、网络）主导，所以
+ * 「按吞吐外推到 160 字上限」那种模型不成立，别拿它当依据；③ 因此按「实测最慢一次 ×1.5」
+ * 取 45s，覆盖单次慢生成 plus 抖动，同时仍紧于内层单 attempt 预算。
  *
- * 刻意**不做成 volatile 配置项**：新增可调字段要同时改 `EditableFields` schema、
- * WebUI 表单、`live-settings.SETTING_SPECS` 键表三处，牵动正在被反复重载的 live
- * profile。要调它改这一个常量即可（一次构建的事），语义上也确实不是用户策略。
+ * 明确接受的代价：一条合法的**两次重试链**（慢 attempt1 + 800ms 退避 + attempt2）会超过
+ * 45s 而被判死。这是有意的——>45s 才到达的续写，对着的早就不是用户此刻的草稿（他继续
+ * 打字时出口 4「被抢先」本来就会把结果丢掉），等它没有价值；这道界的职责是**释放 pending
+ * 并留下痕迹**，不是把一个迟到的答案送上门。
+ *
+ * 45s 仍然**紧于**内层单 attempt 预算 `timeoutMs`（默认 60s），所以这条交互链的有效上界
+ * 是这一个；否则内层那个 60s 才是真正生效的界，这次修复等于没做。
+ *
+ * 刻意**不做成 volatile 配置项**：新增可调字段要同时改 `EditableFields` schema、WebUI
+ * 表单、`live-settings.SETTING_SPECS` 键表三处，牵动正在被反复重载的 live profile。
+ * 要调它改这一个常量即可（一次构建的事）。
  */
-export declare const COMPLETION_DEADLINE_MS = 20000;
-/** 本超时的归属码：用它把「我们判的死」和「上游抢先中止」区分开（见 `timeoutOf`）。 */
+export declare const COMPLETION_DEADLINE_MS = 45000;
+/**
+ * 本超时的归属码，盖在 `deadline()` 产出的 `TimeoutReason` 上。
+ *
+ * 现在**不再**用 `timeoutOf()` 事后判断归属（那要求监听挂在融合 signal 上，正是上一版
+ * 把兜底关掉的原因）——权威已经拆成独立 timer signal，响了就是到点。保留这个码是让报文
+ * 里的 `TimeoutReason` 仍能认出「这是续写的墙钟上界」，而不是别层的超时。
+ */
 export declare const COMPLETION_DEADLINE_CODE = "SUGGEST_GHOST_COMPLETION_DEADLINE";
 /** 全部出口类别；`action:'trace'` 的判定一定落在这里，新增出口必须先加键。 */
 export type CompletionExitReason = 'inline-disabled' | 'draft-too-short' | 'session-missing' | 'superseded' | 'aborted' | 'timeout' | 'failed';
@@ -174,18 +191,26 @@ export interface CompletionDeadline {
  *
  * 与 `deadline()` 的差别只有一个、也是这条修复的全部要点：`deadline()` 到点只是
  * **通知** signal，永不 settle 的 promise 不会因为被通知就 settle。所以这里在通知之外
- * 还要**把这次调用判死**（`onTimeout` 由调用方去清 pending + 留痕 + 中止底层请求），
- * 用 `AbortSignal` 的 `abort` 事件当那个「外部判死」的触发点——它是 `deadline()`
- * 自己暴露的公开面，不是另造的定时体系。
+ * 还要**把这次调用判死**（`onTimeout` 由调用方去清 pending + 留痕 + 中止底层请求）。
  *
- * 归属判定靠 `timeoutOf(signal, code)`：到点携带的是本模块的 `COMPLETION_DEADLINE_CODE`，
- * 上游抢先中止（新草稿抢占 / 卸载）携带的是别人的 reason，必须交回 settle 判定处理，
- * 否则「被抢先」会被误记成「超时」。
+ * ## 为什么超时权威与融合信号必须分成两个 signal
+ * 上一版把监听挂在 `deadline(upstream, …)` 返回的**融合** signal 上，于是「上游先中止」
+ * 和「我们判死」共用同一个事件面，只能靠 `timeoutOf(reason, code)` 事后分辨归属。
+ * 那是错的，而且错得正好落在最难查的那条路上：
+ *  - `upstream` 在 arm 时**已经** aborted（复用了上一轮被 abort 的 controller）→
+ *    融合 signal 一出生就是 aborted → 按「这不是我们的超时」处理 → 顺手把 timer 撤了
+ *    → 那次调用**再也没有界**。若它同时又不响应 abort（正是线上那种挂住），结果就是
+ *    零痕迹 + pending 长挂：比原缺陷更糟，因为它把兜底也关掉了。
+ *  - 融合 signal 一旦中止就**不再**发第二次 abort 事件，所以「上游先中止、底层随后卡死」
+ *    的组合里，这道界同样失效。
+ * 现在把权威拆成两个 signal：`deadline(undefined, …)` 只归我们的 timer 中止（上游怎么动
+ * 都影响不到它），在它上面监听；交给生成链的 `signal` 才是 `AbortSignal.any([upstream,
+ * timer])` 的融合结果。归属因此不再需要事后判断——timer 响了就是到点，别的事件不响。
  *
- * @param upstream - 本次生成的 controller signal。
+ * @param upstream - 本次生成的 controller signal（只作为中止来源参与融合）。
  * @param timeoutMs - 上界（生产取 `COMPLETION_DEADLINE_MS`，冒烟取几十毫秒）。刻意**不设默认值**：
  *   后面还跟着必填的 `onTimeout`，带默认值的参数排在前面只会让调用方被迫传 `undefined`。
- * @param onTimeout - 判死回调（只在**到点**时调用一次）。
+ * @param onTimeout - 判死回调（只在**到点**时调用一次，与上游状态无关）。
  * @returns 融合信号与幂等 disposer。
  */
 export declare function armCompletionDeadline(upstream: AbortSignal, timeoutMs: number, onTimeout: (elapsedMs: number) => void): CompletionDeadline;
