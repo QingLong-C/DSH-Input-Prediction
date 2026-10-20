@@ -56,6 +56,19 @@ export declare function hasCJK(text: string): boolean;
 /** 检测文本是否含西里尔字母（俄语等）。@deprecated 保留给外部调用者，内部已改用 countScripts。 */
 export declare function hasCyrillic(text: string): boolean;
 /**
+ * 判断一个 user/message 事件是否为真实用户消息（非注入）。
+ * 注入消息（time-context, skill-catalog, runtime-context 等）的 source.kind !== 'user'，
+ * 必须在构建转录前过滤，否则会污染 suggestionLanguage 的语言判定。
+ */
+export declare function isRealUserMessage(event: {
+    type: string;
+    data?: {
+        source?: {
+            kind?: string;
+        };
+    };
+}): boolean;
+/**
  * 从旧转录对中提取摘要（零 LLM 成本的启发式方法）。
  *
  * 策略：
