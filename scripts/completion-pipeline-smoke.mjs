@@ -67,7 +67,7 @@ const runAsync = async (name, fn) => {
 };
 
 const SESSION = 'session-95ff1532-3eab-4543-8cd8-d8aaeccdc44c';
-/** 冒烟里一律用小上界，别真等 20s；生产值另有一组不变量断言。 */
+/** 冒烟里一律用小上界，别真等生产那个 45s；生产值的取舍另有一组不变量断言。 */
 const FAST_DEADLINE_MS = 25;
 /** 假装是用户输入的东西：任何一条报文里出现它都算泄漏。 */
 const SENTINEL = 'npm run deploy --force SECRET-DRAFT-TEXT';
@@ -278,15 +278,43 @@ run('超时报文里的上界值取自传入值（不硬编码 20000，改了常
 });
 
 // ── 6. 墙钟上界的取值不变量（这条常量是本修复的全部风险所在）────────────────────
-run('上界既不误杀正常重试，也不会慢到形同没有', () => {
-  // 实测成功 1.5~7s；generateCompletion 自带 2 次尝试 + 800ms 退避。
-  const observedWorst = 7_000;
-  const legitRetryChain = observedWorst * 2 + 800;
-  assert.ok(COMPLETION_DEADLINE_MS > legitRetryChain, `上界 ${COMPLETION_DEADLINE_MS}ms 会把一次合法的两次重试（≈${legitRetryChain}ms）判死`);
-  // 大上下文允许每条 attempt 比最坏实测慢 1 倍以内仍不误杀。
-  assert.ok(COMPLETION_DEADLINE_MS >= observedWorst * 2, `上界 ${COMPLETION_DEADLINE_MS}ms 连「大上下文慢一倍 ×2 次」都容不下`);
-  assert.ok(COMPLETION_DEADLINE_MS <= 30_000, `上界 ${COMPLETION_DEADLINE_MS}ms 太久：那是用户已经忘了自己在等什么的时候`);
-  assert.ok(COMPLETION_DEADLINE_MS < 60_000, '必须比内层单 attempt 预算（timeoutMs 默认 60s）更紧，否则这条链的有效上界还是内层那个 60s');
+run('上界按真宿主实测分布取值，不是按快样本的算术', () => {
+  // 这三条是隔离沙箱（同一台机器、同一 provider、模型 Qwen3.8-Flash）里
+  // `completion generated … in Nms` 打出来的真实耗时，不是估计：
+  //   chars=39  → 18971ms
+  //   chars=132 → 24217ms
+  //   chars=109 → 27793ms
+  // 上一版按「实测 1.5~7s」推了个 20s，真宿主里立刻误杀了一次合法生成
+  // （`completion timeout: no settle within 20000ms … after 20001ms`）。把实测写进断言，
+  // 是为了让「再照着快样本收紧」必须先改掉这里的数字——改的人得先承认自己换了证据。
+  const MEASURED = [
+    { chars: 39, ms: 18_971 },
+    { chars: 132, ms: 24_217 },
+    { chars: 109, ms: 27_793 },
+  ];
+  const slowest = Math.max(...MEASURED.map((m) => m.ms));
+  // 注意耗时与输出字数**不**成正比（132 字比 109 字快），所以这里不做「按吞吐外推到
+  // inlineMaxChars」那种算术——那会把上界推到荒谬的 77s。固定开销主导，只看分布。
+  assert.ok(
+    COMPLETION_DEADLINE_MS > slowest,
+    `上界 ${COMPLETION_DEADLINE_MS}ms 比实测最慢的一次合法生成（${slowest}ms）还短，会误杀`,
+  );
+  assert.ok(
+    COMPLETION_DEADLINE_MS >= slowest * 1.5,
+    `上界 ${COMPLETION_DEADLINE_MS}ms 没给实测分布留 1.5 倍余量（最慢 ${slowest}ms）：抖动一下就撞界`,
+  );
+  // 那条被 20s 界杀掉的记录本身就是证据：界必须显著高于 20s。
+  assert.ok(COMPLETION_DEADLINE_MS > 20_000, '回到被误杀的那个取值了');
+  // 但必须紧于内层单 attempt 的 timeoutMs（默认 60s），否则这条链的有效上界还是内层那个。
+  assert.ok(
+    COMPLETION_DEADLINE_MS < 60_000,
+    `上界 ${COMPLETION_DEADLINE_MS}ms 不比内层单 attempt 预算更紧，等于没加外部界`,
+  );
+  // 也不能无限拖：用户等的是幽灵，不是考古。
+  assert.ok(
+    COMPLETION_DEADLINE_MS <= 45_000,
+    `上界 ${COMPLETION_DEADLINE_MS}ms 太久：那之后到达的续写对着的早就不是这份草稿了`,
+  );
 });
 
 run('本次修复不新增 volatile 配置字段（上界是常量）', () => {
@@ -504,16 +532,179 @@ await runAsync('真实失败仍走既有 completion-failed 报文格式', async 
   assert.equal(h.pending.size, 0);
 });
 
-await runAsync('armCompletionDeadline：上游中止不触发 onTimeout（归属由超时码判定）', async () => {
+await runAsync('armCompletionDeadline：上游中止不触发 onTimeout（超时权威独立于融合信号）', async () => {
   const controller = new AbortController();
   let fired = 0;
-  const bound = armCompletionDeadline(controller.signal, 20, () => { fired += 1; });
+  const bound = armCompletionDeadline(controller.signal, 200, () => { fired += 1; });
   controller.abort();
   await sleep(60);
-  assert.equal(fired, 0, '上游中止被误记成超时：被抢先会显示成挂住');
-  assert.equal(bound.signal.aborted, true);
+  assert.equal(fired, 0, '上游中止被当成超时触发了：被抢先会显示成挂住');
+  assert.equal(bound.signal.aborted, true, '融合信号必须把上游中止传下去');
   bound.dispose();
   bound.dispose(); // 幂等
+  await sleep(260);
+  assert.equal(fired, 0, 'dispose 之后到点仍触发：timer 没被撤干净，进程会白挂定时器');
+});
+
+await runAsync('armCompletionDeadline：上游已中止时也要到点判死（上一版在这里把兜底关掉了）', async () => {
+  const controller = new AbortController();
+  controller.abort(new Error('上一轮的遗留中止'));
+  let fired = 0;
+  const bound = armCompletionDeadline(controller.signal, 20, () => { fired += 1; });
+  await sleep(60);
+  assert.equal(fired, 1, `arm 时上游已 aborted 就不判死了（fired=${fired}）：那次挂住的生成再也没有界`);
+  bound.dispose();
+});
+
+await runAsync('arm 之后上游才中止、底层不响应 abort：界仍要到点判死', async () => {
+  // 融合 signal 一旦中止就不会再发第二次 abort 事件。上一版把监听挂在融合 signal 上，
+  // 于是「上游先中止 + 底层随后卡死」这个组合里上界彻底失效——正是 lead 第 1 条要查的形状。
+  const controller = new AbortController();
+  let fired = 0;
+  const bound = armCompletionDeadline(controller.signal, 30, () => { fired += 1; });
+  controller.abort();
+  await sleep(90);
+  assert.equal(fired, 1, `上游中止之后就没界了（fired=${fired}）：被抢先又不落 settle 的生成会永久挂着`);
+  bound.dispose();
+});
+
+// ── 7b. 留痕必须以「打出来的行」计，不能以 traceFault 的调用次数计 ────────────────
+// 沙箱实测（lead，port 41933，上界压到 1500ms）：第一次停顿打出
+//   `completion timeout: … [completion-timeout #1]`
+// 第二次停顿 20 秒内一行都没有。而第 7 段那组「超时之后下一次正常生成照常交付」全绿
+// ——因为 harness 的 `trace` 收的是**调用**，而 `traceFault` 会把同一个桶里第
+// 2..every-1 次吞掉。换句话说这套冒烟当时把「静音」当成了「有痕」，正是要补的那一维。
+//
+// 这个 printer 复刻 `src/index.ts` 的 traceFault 规则；第 8 段有一条静态守卫钉住
+// 「规则本体没被改过」，规则一改那边就红，避免复刻件与原件各说各话。
+function mkFaultPrinter() {
+  const counts = new Map();
+  const printed = [];
+  return {
+    printed,
+    trace: (kind, message, every) => {
+      const key = `${kind}|${faultSignature(message)}`;
+      const seen = (counts.get(key) ?? 0) + 1;
+      counts.set(key, seen);
+      if (seen !== 1 && seen % every !== 0) return;
+      printed.push({ kind, message, seen });
+    },
+  };
+}
+
+/** 把 printer 与调用收集器叠在一起：既看「调用了几次」也看「打出来几行」。 */
+const dualHarness = (deadlineMs = FAST_DEADLINE_MS) => {
+  const pending = new Map();
+  const calls = [];
+  const delivered = [];
+  const printer = mkFaultPrinter();
+  const deps = {
+    pending,
+    trace: (kind, message, every) => {
+      calls.push({ kind, message, every });
+      printer.trace(kind, message, every);
+    },
+    deliver: (delivery) => { delivered.push(delivery); },
+    deadlineMs,
+  };
+  return { pending, calls, printed: printer.printed, delivered, deps };
+};
+
+await runAsync('连续两次都永不 settle：两次都必须各打出一条 completion-timeout', async () => {
+  const h = dualHarness();
+  const first = new AbortController();
+  h.pending.set(SESSION, first);
+  startBoundedCompletion(h.deps, {
+    sessionId: SESSION, controller: first, startedAt: Date.now(), draftChars: 14,
+    generate: () => new Promise(() => {}),
+  });
+  await sleep(FAST_DEADLINE_MS * 3);
+  assert.equal(h.printed.length, 1, `第一次应打出一行，实得 ${h.printed.length}`);
+  // 第二次停顿：换草稿、同样挂住 —— 沙箱里就是这一步彻底静默。
+  const second = new AbortController();
+  h.pending.set(SESSION, second);
+  startBoundedCompletion(h.deps, {
+    sessionId: SESSION, controller: second, startedAt: Date.now(), draftChars: 17,
+    generate: () => new Promise(() => {}),
+  });
+  await sleep(FAST_DEADLINE_MS * 3);
+  assert.equal(h.calls.length, 2, `上界本身要触发两次（调用数=${h.calls.length}）：没触发才是判死逻辑坏了`);
+  assert.equal(
+    h.printed.length,
+    2,
+    `两次超时打出来 ${h.printed.length} 行（却有 ${h.calls.length} 次判死调用）：`
+    + '上界生效了、痕被节流吞掉 —— 现场仍然表现为「第二次停顿什么都没有」，与沙箱实测同形。'
+    + `实得 ${JSON.stringify(h.printed.map((p) => `${p.kind} #${p.seen}`))}`,
+  );
+  assert.deepEqual(h.printed.map((p) => p.kind), ['completion-timeout', 'completion-timeout']);
+  assert.equal(h.pending.size, 0, '两次之后 pending 必须干净');
+  assert.equal(second.signal.aborted, true, '第二次没中止底层请求');
+});
+
+await runAsync('跨会话各打一条：签名把 session id 折进同一个桶，第二个会话的第一次不许隐身', async () => {
+  // `faultSignature` 刻意把 `session-<hex>` 折成 `session`（否则节流等于没做），
+  // 于是**所有会话共用同一个 timeout 桶**。而用户报的是「我这个会话 8 次消费 0 痕迹」，
+  // 单位是会话：共桶意味着别的会话早就把计数推上去了。
+  const h = dualHarness();
+  const sessions = [
+    SESSION,
+    'session-0064ca6c-2d85-4f21-88af-cb82e3eabf65',
+    'session-11223344-5566-7788-99aa-bbccddeeff00',
+  ];
+  for (const sid of sessions) {
+    const controller = new AbortController();
+    h.pending.set(sid, controller);
+    startBoundedCompletion(h.deps, {
+      sessionId: sid, controller, startedAt: Date.now(), draftChars: 14,
+      generate: () => new Promise(() => {}),
+    });
+    await sleep(FAST_DEADLINE_MS * 3);
+  }
+  assert.equal(h.calls.length, 3, `三个会话各判死一次，调用数=${h.calls.length}`);
+  assert.equal(
+    h.printed.length,
+    3,
+    `每个会话的第一次超时都要可见（实得 ${h.printed.length} 行）：跨会话共桶时，`
+    + '非逐次可见的 timeout 就是「这个会话 8 次消费 0 痕迹」的直接成因',
+  );
+});
+
+await runAsync('复用的 controller 已经 aborted：上界仍要独立判死那次挂住的生成', async () => {
+  // 定向查 lead 的第 1 条：arm 时 `controller.signal.aborted` 已为真会怎样。
+  // 原实现走的是「融合 signal 已中止 → 撤 timer、不调 onTimeout」那条路，于是那个
+  // 既不 resolve 也不看 signal 的生成**再也没有界**，且没有任何痕——与线上症状同形。
+  const h = dualHarness();
+  const controller = new AbortController();
+  controller.abort(new Error('上一轮卸载留下的中止'));
+  h.pending.set(SESSION, controller);
+  startBoundedCompletion(h.deps, {
+    sessionId: SESSION, controller, startedAt: Date.now(), draftChars: 14,
+    // 真实挂住形态：不响应 abort、永不 settle。
+    generate: () => new Promise(() => {}),
+  });
+  await sleep(FAST_DEADLINE_MS * 3);
+  assert.equal(
+    h.printed.length,
+    1,
+    `上游已中止时上界被撤掉了（判死调用 ${h.calls.length} 次、打印 ${h.printed.length} 行）：`
+    + '「被抢先 / 卸载」确实该交给 settle 判定，但 settle 永不发生时这道界必须还在',
+  );
+  assert.equal(h.printed[0].kind, 'completion-timeout');
+  assert.equal(h.pending.size, 0, 'pending 残留');
+});
+
+await runAsync('除 timeout 之外的出口仍是「按量」信号，不是「按次」信号（钉住这个边界）', () => {
+  // 只有 timeout 逐次可见。其余出口逐次打就是在重新制造 #21 那种洪水，而且它们的
+  // 每一次打印都带 [kind #累计]，量信息不丢。这条断言防的是「以后有人以为
+  // preempted 也逐次可见」——要改语义得先改这里的判定与注释。
+  for (const reason of COMPLETION_EXIT_REASONS) {
+    const { every } = completionExitTrace(reason);
+    if (reason === 'timeout') {
+      assert.equal(every, 1, 'timeout 必须逐次可见：每次都是用户真的白等了一整轮上界');
+    } else {
+      assert.ok(every > 1, `${reason} 若也逐次打印，就是在本不该改的地方动了留痕量：${every}`);
+    }
+  }
 });
 
 // ── 8. host 接线的静态守卫 ─────────────────────────────────────────────────────
@@ -558,8 +749,6 @@ run('既有旧串逐字未改（别的脚本按这些串 grep 验收）', () => 
   for (const needle of old) {
     assert.ok(hostRaw.includes(needle), `既有留痕串被改动或删掉了：${needle}`);
   }
-  // failed 的报文改由 gate 生成（index.ts 里只剩引用），所以既要在 gate 源码里逐字保住旧串，
-  // 也要证明产物字节不变。
   // failed 的报文改由 gate 生成（index.ts 里只剩引用），所以既要在 gate 源码里
   // 逐字保住旧串，也要证明产物字节不变。
   const gateText = readFileSync(fileURLToPath(new URL('../src/completion-gate.ts', import.meta.url)), 'utf8');
@@ -588,11 +777,20 @@ run('卸载清理仍然中止所有在途续写', () => {
   assert.ok(abortAllAt > effectAt, '卸载时不再中止在途续写：旧闭包的请求会跨 partialReload 活着');
 });
 
+run('traceFault 的分桶与节流规则本体未变（7b 的复刻件因此仍然有效）', () => {
+  // 7b 用 printer 复刻了这条规则来数「打出来几行」。复刻件的正确性依赖原件：规则一改
+  // （改成按会话分桶、改成滑动窗口……）这边必须跟着改，否则 7b 是在测一个不存在的行为。
+  // 这三条 match 就是那个联动提醒，不是装饰。
+  assert.match(hostSource, /const key = `\$\{kind\}\|\$\{faultSignature\(message\)\}`;/, '分桶键变了：7b 的 printer 复刻失效');
+  assert.match(hostSource, /if \(seen !== 1 && seen % every !== 0\) return;/, '节流规则变了：7b 的 printer 复刻失效');
+  assert.match(hostSource, /traceOps\(`\$\{message\} \[\$\{kind\} #\$\{seen\}\]`\)/, '打印格式变了：累计计数不在报文里，阈值取舍的依据就没了');
+});
+
 // ── 9. 反向验证（改回静默必须红）见文件末尾注释 ────────────────────────────────
 console.log(`\n${process.exitCode === 1 ? '❌' : '✅'} completion-pipeline-smoke: ${cases} 组用例${process.exitCode === 1 ? '（有失败）' : '全部通过'}`);
 
 /**
- * ## 怎么做反向验证（本机照做，三步各验一条）
+ * ## 怎么做反向验证（本机照做，每条都是「改坏必红、改回必绿」）
  *
  *  R1 把出口 5 改回静默：`src/completion-gate.ts` 里
  *      `if (input.phase === 'reject' && input.aborted) return traceOf('aborted');`
@@ -609,4 +807,35 @@ console.log(`\n${process.exitCode === 1 ? '❌' : '✅'} completion-pipeline-smo
  *      直接 `const bound = { signal: controller.signal, dispose() {} }`，
  *      → 应红在「永不 settle 的生成：到点留 completion-timeout、清 pending、abort 底层」。
  *      这条是缺陷二的反向验证：没有上界时那个 promise 就永远挂着，与线上一致。
+ *
+ *  R4 把 host 侧留痕通道接成 no-op：`src/index.ts` 里 `trace: traceFault,` 换成
+ *      `trace: () => {},` → 应红在「五个出口在 host 侧真的走 traceFault（不是裸 return）」。
+ *      这条防的是「纯函数全绿但根本没接上」——本次修复的两半各要一条守卫。
+ *
+ *  R5 假装往 `EditableFields` 里加一个 volatile 上界字段 → 应红在
+ *      「本次修复不新增 volatile 配置字段（上界是常量）」。
+ *
+ *  R6 把上界改回 20_000（那个在真宿主里误杀过合法生成的值）→ 应红在
+ *      「上界按真宿主实测分布取值，不是按快样本的算术」，报的是
+ *      `上界 20000ms 比实测最慢的一次合法生成（27793ms）还短，会误杀`。
+ *
+ *  R7 把 timeout 的节流阈值改回 5（沙箱里造成「第二次停顿彻底静默」的那个值）→ 应红在
+ *      「连续两次都永不 settle：两次都必须各打出一条 completion-timeout」、
+ *      「跨会话各打一条…」，以及「除 timeout 之外的出口仍是按量信号」那条边界断言。
+ *      注意：改坏时**调用**仍有两次、只有**打印**少一条——所以必须用 printer 数行数，
+ *      光数 `trace` 调用的那组断言会全绿（这正是第一次漏网的机制）。
+ *
+ *  R8 把超时权威重新挂回融合 signal（`deadline(upstream, …)` 并在它上面监听）→ 应红 5 条：
+ *      「上游抢先 → 记 superseded，绝不误记 timeout」「卸载式中止 → 记 completion-aborted」
+ *      「上游已中止时也要到点判死」「arm 之后上游才中止 → 界仍要判死」等。
+ *      这一条同时钉住两个方向的错：误判成超时、以及判死被撤掉。
+ *
+ * ## 真宿主侧的证据（离线断言替代不了的部分）
+ *  1. `every: 1` 的修复效果：把沙箱私有产物的上界压到 1500ms，同一会话连续两次停顿
+ *     （草稿各改一次）打出 `[completion-timeout #1]` 与 `[completion-timeout #2]`。
+ *  2. 反证：同一沙箱、同一配方，只把 `every: 1` 改回 `every: 5`，第二次停顿只有
+ *     `ops consumed: complete … draftChars=13` 而**没有任何后续痕迹** —— 与 lead 的
+ *     复现逐字同形。变量只有那一个，所以因果是钉住的。
+ *  3. 上界取值：同一沙箱把界放开到 60s 后实测三条合法生成 `in 18971 / 24217 / 27793ms`，
+ *     而 20s 那版打出了一条 `no settle within 20000ms`（误杀）。见第 6 段那组不变量。
  */
