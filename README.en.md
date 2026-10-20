@@ -6,7 +6,7 @@
 
 **English** | [简体中文](README.md)
 
-[![version](https://img.shields.io/badge/version-0.5.0-0EA5E9)](https://github.com/dsh-plugins/dsh-suggest-ghost)
+[![version](https://img.shields.io/badge/version-0.6.0-0EA5E9)](https://github.com/dsh-plugin-collection/dsh-suggest-ghost)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![DSH](https://img.shields.io/badge/DeepSeek%20Harness-0.2.0--rc.2-4D6BFE)](https://github.com/deepseek-ai/deepseek-harness)
 
@@ -53,7 +53,7 @@ dsh plugin --profile web add "github:WuJiaoJue/dsh-suggest-ghost"
 Or from source:
 
 ```bash
-git clone https://github.com/dsh-plugins/dsh-suggest-ghost.git
+git clone https://github.com/dsh-plugin-collection/dsh-suggest-ghost.git
 cd dsh-suggest-ghost && pnpm install && pnpm run build
 dsh plugin --profile web add .
 ```
