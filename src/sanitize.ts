@@ -89,6 +89,13 @@ const THANKS_RE = /\b(?:thanks|thank you|looks good|looks great|great job|well d
 const ASSISTANT_VOICE_RE = /\b(?:let me|i'?ll|i will|here'?s|i can|我来|我帮你|我来帮你|让我)\b/i;
 const QUESTION_RE = /^[¿?？]|(?:[?？]\s*$)/;
 
+/**
+ * 判为「对话式回答」的形态阈值（续写专用，取值理由见 `shouldFilterCompletionFor`）。
+ * 两个条件**同时**满足才算回答：输出够长（绝对量）且远超草稿（相对量）。
+ */
+const CONVERSATION_MIN_CHARS = 40;
+const CONVERSATION_RATIO_TRIGGER = 5;
+
 /** 判定净化后的输出是否应丢弃（返回 true = 无建议）。 */
 export function shouldFilterSuggestion(text: string): boolean {
   if (text.length === 0) return true;
@@ -124,6 +131,61 @@ export function shouldFilterCompletion(text: string): boolean {
     if (/^[\p{P}\p{S}]+$/u.test(word)) return true;
   }
   return false;
+}
+
+/**
+ * "续写变成了回答"的形态兜底判据。
+ *
+ * ## 为什么需要它
+ *
+ * `shouldFilterCompletion` 只做语义过滤，且**故意**放行助手口吻与问句（见上一行的注释，
+ * `scripts/inline-smoke.mjs` 有断言钉着这个决定）。于是当模型把「用户正在输入的草稿」
+ * 当成「发给它的消息」去**回答**时，链路上没有任何拦截 —— 用户看到的就是幽灵位置冒出一段
+ * 回复而不是下半句。
+ *
+ * ## 为什么用形态而不是语义正则
+ *
+ * 想靠 `ASSISTANT_VOICE_RE` / `QUESTION_RE` 拦，就会误杀中文正常续写：这两个正则里有
+ * `我来|我帮你|让我` 和 `？`，而中文草稿的续写里"你""吗""？"极其常见 —— 拦掉它们等于把
+ * 这个功能的常用场景一起砍掉。所以改用**与语言无关的形态特征**：真正的续写是"接着你的话
+ * 往下写半句"，而回答是"成段、且相对草稿显著更长"。
+ *
+ * ## 阈值怎么来的（线上实测，非拍脑袋）
+ *
+ * 数据源：`/tmp/dsh-web-now.log` 单次会话的 42 次 `completion generated`，字段只有长度
+ * （正文受隐私约束不落盘），分布：
+ *
+ * ```
+ * 输出长度  min=2  中位=31.5  p90=67  max=135
+ * 12/42 次 输出 > 草稿 3 倍；最极端 5 字草稿 → 94 字输出（18.8x）
+ * ```
+ *
+ * - `>200` 的绝对上限已由 `shouldFilterCompletion` 承担，这里不重复。
+ * - 取 **输出 > 草稿 × 5**（`CONVERSATION_RATIO_TRIGGER`）并叠加 **输出 ≥ 40 字**
+ *   （`CONVERSATION_MIN_CHARS`）：两个条件同时满足才判为对话式回答。
+ *   为什么是 5 而不是首版写的 8：按 8x 跑冒烟时**当场漏掉了实测里的 6→46（7.7x）**，
+ *   也就是"该拦的没拦住"。重算分布后取 5x，覆盖实测那批回答形态
+ *   （18.8x / 7.7x / 6.0x / 5.8x / 5.5x；再往下 4.2x、4.0x 已经是"长草稿续得也多"的
+ *   正常态，不该拦）；而：
+ *   - 既有正例（`What about the tests?` 21 字、`thanks for asking!` 18 字、
+ *     `Let me look into that for you` 29 字）都**不到 40 字**，绝对安全；
+ *   - 实测里 `174 字草稿 → 125 字输出`（0.7x）这类**长草稿正常续写**也不会被拦（比值远小于 8）。
+ *
+ * 用**字符数**而非词数：中文没有空格，`text.split(/\s+/)` 对中文几乎无效（既有实现里那句
+ * 孤立词判定对中文基本是空转），比值必须按字符算。
+ *
+ * @param text 净化后的续写输出
+ * @param draft 生成这份续写时客户端提交的草稿
+ * @returns true = 判为对话式回答，应当丢弃
+ */
+export function shouldFilterCompletionFor(text: string, draft: string): boolean {
+  if (shouldFilterCompletion(text)) return true;
+  if (text.length < CONVERSATION_MIN_CHARS) return false;
+  const draftChars = draft.trim().length;
+  // 空草稿不该走到这里（续写要求草稿非空），但真出现时一律按"可疑"处理：
+  // 没有任何草稿还输出成段文本，只可能是回答。
+  if (draftChars === 0) return true;
+  return text.length > draftChars * CONVERSATION_RATIO_TRIGGER;
 }
 
 /** 剥离续写输出中对草稿的回显（避免重复用户已输入的内容）。 */
