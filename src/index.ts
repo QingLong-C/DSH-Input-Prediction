@@ -120,7 +120,7 @@ const EditableFields = {
   /** 停顿续写开关（默认开）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
   inlineEnabled: z.boolean().default(true).volatile(),
   /** 停顿多久后触发续写（毫秒）。 */
-  inlineDelayMs: z.natural().min(100).default(800).volatile(),
+  inlineDelayMs: z.natural().min(100).default(100).volatile(),
   /** 草稿至少输入多少字符才触发续写。 */
   inlineMinChars: z.natural().min(1).default(4).volatile(),
   /** 续写可见字符上限。 */

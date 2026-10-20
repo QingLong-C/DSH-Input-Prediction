@@ -233,7 +233,7 @@ const apply = (state, observation) => {
 // ── 9. applySettings 的值深比较（volatile 配置展开值）────────────────────────────
 {
   const base = {
-    inlineDelayMs: 800,
+    inlineDelayMs: 100,
     hot: [{ text: 'git status', count: 3 }],
     history: ['a', 'b'],
     suggestion: { turn: 1, baseSeq: 2, text: 'next', truncated: false, acceptKey: 'Tab' },
