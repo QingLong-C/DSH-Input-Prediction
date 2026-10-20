@@ -862,7 +862,7 @@ function applyBody(ctx: Context): void {
     historyMaxEntries: 50,
     historyMinChars: 1,
     inlineEnabled: true,
-    inlineDelayMs: 800,
+    inlineDelayMs: 100,
     inlineMinChars: 4,
     wordAccept: true,
     suggestion: cached.suggestion ?? null,
@@ -1525,7 +1525,7 @@ function applyBody(ctx: Context): void {
             historyMaxEntries: typeof v.historyMaxEntries === 'number' ? v.historyMaxEntries : 50,
             historyMinChars: typeof v.historyMinChars === 'number' ? v.historyMinChars : 1,
             inlineEnabled: typeof v.inlineEnabled === 'boolean' ? v.inlineEnabled : true,
-            inlineDelayMs: typeof v.inlineDelayMs === 'number' ? v.inlineDelayMs : 800,
+            inlineDelayMs: typeof v.inlineDelayMs === 'number' ? v.inlineDelayMs : 100,
             inlineMinChars: typeof v.inlineMinChars === 'number' ? v.inlineMinChars : 4,
             wordAccept: typeof v.wordAccept === 'boolean' ? v.wordAccept : true,
             suggestion: pushed?.suggestion === null || pushed?.suggestion === undefined

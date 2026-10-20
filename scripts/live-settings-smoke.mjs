@@ -58,7 +58,7 @@ function makeBoot(over = {}) {
     wordAccept: true,
     languageMode: 'auto',
     uiLocaleWeight: 100,
-    inlineDelayMs: 800,
+    inlineDelayMs: 100,
     inlineMinChars: 4,
     _ops: 'BOOT_OPS_REF',
     _push: 'BOOT_PUSH_REF',
