@@ -94,7 +94,7 @@ const QUESTION_RE = /^[¿?？]|(?:[?？]\s*$)/;
  * 两个条件**同时**满足才算回答：输出够长（绝对量）且远超草稿（相对量）。
  */
 const CONVERSATION_MIN_CHARS = 40;
-const CONVERSATION_RATIO_TRIGGER = 5;
+const CONVERSATION_RATIO_TRIGGER = 3;
 
 /** 判定净化后的输出是否应丢弃（返回 true = 无建议）。 */
 export function shouldFilterSuggestion(text: string): boolean {
@@ -163,13 +163,15 @@ export function shouldFilterCompletion(text: string): boolean {
  * - `>200` 的绝对上限已由 `shouldFilterCompletion` 承担，这里不重复。
  * - 取 **输出 > 草稿 × 5**（`CONVERSATION_RATIO_TRIGGER`）并叠加 **输出 ≥ 40 字**
  *   （`CONVERSATION_MIN_CHARS`）：两个条件同时满足才判为对话式回答。
- *   为什么是 5 而不是首版写的 8：按 8x 跑冒烟时**当场漏掉了实测里的 6→46（7.7x）**，
- *   也就是"该拦的没拦住"。重算分布后取 5x，覆盖实测那批回答形态
- *   （18.8x / 7.7x / 6.0x / 5.8x / 5.5x；再往下 4.2x、4.0x 已经是"长草稿续得也多"的
- *   正常态，不该拦）；而：
+ *   比值取 3 的经过（两次都靠冒烟/复核抓出来，不是拍的）：
+ *   首版写 8x → 冒烟当场漏掉实测的 6→46（7.7x）；改 5x 后复核发现仍有 3.0~4.2x 那批
+ *   （16→67、34→135、22→79、18→54）会被放过，而 9→54 恰好卡在等号上被 `>` 漏掉。
+ *   取 3x 后拦下 8/42（5x 时 5/42），且正例全安全。
+ *   不再往下压到 2.5x（能到 10/42）：2.5x 已经进入"短草稿正常续写"的常见区间，
+ *   继续压会开始误杀；而下面的绝对量门限保证短输出不参与判定。
  *   - 既有正例（`What about the tests?` 21 字、`thanks for asking!` 18 字、
  *     `Let me look into that for you` 29 字）都**不到 40 字**，绝对安全；
- *   - 实测里 `174 字草稿 → 125 字输出`（0.7x）这类**长草稿正常续写**也不会被拦（比值远小于 8）。
+ *   - 实测里 `174 字草稿 → 125 字输出`（0.7x）这类**长草稿正常续写**也不会被拦（0.7x，远小于 3）。
  *
  * 用**字符数**而非词数：中文没有空格，`text.split(/\s+/)` 对中文几乎无效（既有实现里那句
  * 孤立词判定对中文基本是空转），比值必须按字符算。

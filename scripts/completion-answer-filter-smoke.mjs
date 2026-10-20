@@ -60,25 +60,40 @@ run('5 字草稿 → 94 字输出被拦（实测 18.8x，最极端一次）', ()
   assert.equal(shouldFilterCompletionFor('答'.repeat(94), '看看这个'), true);
 });
 
-run('实测高比值形态被拦（18.8x / 7.7x / 6.0x / 5.8x）', () => {
+run('实测回答形态全部被拦（18.8x / 7.7x / 6.0x / 5.5x / 4.2x / 4.0x / 3.6x / 3.0x）', () => {
+  // 阈值从 5x 收到 3x 的直接原因：这两条在 5x 下会被放过，而它们是实测里明确的回答形态。
   const cases = [
-    ['看看这个', '答'.repeat(94)],          // 18.8x —— 最极端一次
-    ['草'.repeat(6), '输'.repeat(46)],      // 7.7x
-    ['草'.repeat(9), '输'.repeat(54)],      // 6.0x
-    ['草'.repeat(8), '输'.repeat(46)],      // 5.8x（恰好过 5x 线，钉住边界）
+    ['看看这个', '答'.repeat(94)],           // 18.8x 最极端一次
+    ['草'.repeat(6), '输'.repeat(46)],       // 7.7x
+    ['草'.repeat(9), '输'.repeat(54)],       // 6.0x（54 == 9×6）
+    ['草'.repeat(8), '输'.repeat(44)],       // 5.5x
+    ['草'.repeat(16), '输'.repeat(67)],      // 4.2x ← 5x 阈值下曾放过
+    ['草'.repeat(34), '输'.repeat(135)],     // 4.0x ← 同上
+    ['草'.repeat(22), '输'.repeat(79)],      // 3.6x
   ];
   for (const [draft, out] of cases) {
     assert.equal(shouldFilterCompletionFor(out, draft), true, `未拦下：${draft.length}→${out.length}`);
   }
 });
 
-run('已知放过：4.2x 的边界形态（宁可漏拦也不误杀，理由见下）', () => {
-  // 16 字草稿 → 67 字输出 = 4.2x。它**可能**是回答，也**可能**是"接着半句话写完一个长句"，
-  // 而正文受隐私约束不落盘，无法从长度区分。这里明确选择**放过**：
-  //   漏拦的代价 = 偶尔看到一次回答（用户一眼可见、可再报）；
-  //   误杀的代价 = 功能静默失效，与"没生成"同形（正是本仓库反复踩过的那类难查问题）。
+run('边界语义：恰好等于 3 倍时不拦（判据用严格 `>`，这是刻意选择）', () => {
+  // 实测里 18→54 恰好是 3.0x。它落在"边界不拦"这一侧 —— 与 16→67（4.2x，拦）形成对照，
+  // 把 `>` 的语义钉死。取严格 `>` 而非 `>=` 是有意的：等比例延伸（草稿本身长、续写也长）
+  // 是正常形态，不该因为差一个字就翻面。
+  assert.equal(shouldFilterCompletionFor('输'.repeat(54), '草'.repeat(18)), false, '恰好 3.0x 不应被拦');
+  assert.equal(shouldFilterCompletionFor('输'.repeat(60), '草'.repeat(20)), false, '刚好 3.0x 不应被拦');
+});
+
+run('已知放过：输出不足 40 字的形态（绝对量门限，宁可漏拦也不误杀）', () => {
+  // 4 字草稿（`inlineMinChars` 的可达下限）→ 25 字输出 = 6.3x，比值已过线但**绝对量不足 40**，
+  // 故放行。理由是不对称代价：
+  //   漏拦 = 偶尔看到一次回答（用户一眼可见、可再报）；
+  //   误杀 = 功能静默失效，与"没生成"同形（正是本仓库反复踩过的那类难查问题）。
+  // 25 字的中文续写完全可能是"接着你半句话写完整句"，仅凭长度无法与回答区分。
   // 真正治本的是 prompt 侧（见 src/inline.ts 的 inlinePrompt）；本判据只是兜底。
-  assert.equal(shouldFilterCompletionFor('输'.repeat(67), '草'.repeat(16)), false);
+  assert.equal(shouldFilterCompletionFor('输'.repeat(25), '草草草草'), false);
+  // 绝对量门限保证：任何 < 40 字的输出都不参与形态判定，无论比值多高。
+  assert.equal(shouldFilterCompletionFor('输'.repeat(30), '草草草草'), false);
 });
 
 // ── 3. 边界 ──────────────────────────────────────────────────────────────────
