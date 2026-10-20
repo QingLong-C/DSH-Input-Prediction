@@ -26,6 +26,7 @@ import { inlinePrompt, sanitizeCompletion } from './inline.js';
 import {
   extractContextSummary,
   frameTranscript,
+  isRealUserMessage,
   suggestionLanguage,
   trimTranscript,
 } from './transcript.js';
@@ -355,7 +356,7 @@ export function buildTranscript(
     if (event.type !== 'user/message' && event.type !== 'assistant/message') continue;
     // Skip injected user messages (time-context, skill-catalog, runtime-context, etc.)
     // Only keep real user messages where source.kind === 'user'
-    if (event.type === 'user/message' && event.data?.source?.kind !== 'user') continue;
+    if (event.type === 'user/message' && !isRealUserMessage(event)) continue;
     const message = deriveEventMessage(event);
     if (message === null) continue;
     const text = renderMessageText(message).trim();
