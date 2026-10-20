@@ -247,11 +247,16 @@ export function suggestionLanguage(
   //   拉丁证据超过 UI 先验 → English（用户持续使用英语推翻 UI）；
   //   否则 → UI 语言（先验压制短英文消息）
   if (cjkScore >= 6 && cjkScore >= cyrillicScore) {
-    // CJK 证据足够；有 UI 先验时需同时领先拉丁（否则用户持续英文推翻）
-    if (!hasUiPrior || cjkScore >= latinScore) return '简体中文';
+    if (!hasUiPrior) return '简体中文';
+    // Has UI prior: only return English if latin evidence exceeds the prior threshold
+    if (latinScore > uiLocaleWeight) return 'English';
+    return '简体中文';
   }
   if (cyrillicScore >= 6 && cyrillicScore > cjkScore) {
-    if (!hasUiPrior || cyrillicScore >= latinScore) return 'Russian';
+    if (!hasUiPrior) return 'Russian';
+    // Has UI prior: only return English if latin evidence exceeds the prior threshold
+    if (latinScore > uiLocaleWeight) return 'English';
+    return 'Russian';
   }
 
   // 语言惯性：最近消息太短/无足够信号时，回退到上次建议的语言
