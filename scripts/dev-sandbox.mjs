@@ -28,6 +28,14 @@
  * }
  * ```
  *
+ * ## 两条会让"量出来的数据"骗人的使用坑（实测）
+ *
+ * - 不带 `--deploy` 会 `rmSync(HOME_)` 整体重建并从仓里拷 `lib/`，所以**手改沙箱私有产物再重启
+ *   会被冲掉**。要做 A/B（例如临时压小超时值验证超时路径），先拷一份 deploy 源目录、改它、再用
+ *   `--deploy <那个目录>`；启动后回读 `plugin/lib` 里的实际值，确认了才认数据。
+ * - 启动时打印的 `dsh web:` URL 可能取自日志里的**旧**行（日志是追加写的，上一轮的行还在）。
+ *   真实端口要用 pid 去 `ss -ltnp` 对。
+ *
  * ## 三条实测踩过的坑（改回去就会再踩，实现里都留了注释）
  *
  * 1. **profile 里的 volatile 值是跨多行的单引号标量**（本仓 `_push` 实测跨 16~35 行，里面存着
@@ -363,6 +371,27 @@ function main() {
     say(`已部署构建：${src}/lib → ${PLUGIN}/lib`);
   }
 
+  // 凭据**必须**复制成文件：`credentials-local` 读的是 `dshHomePath('.credentials.yaml')`
+  // （`dsh-credentials-local/lib/index.js:58`），沙箱换了 DSH_HOME 就读到空文件，于是任何
+  // 走 `apiKeyEnv` 的路由都报 `no credential for provider route …`，而这类失败与"路由没配好"
+  // 在现象上很难区分（实测踩过：整整一轮沙箱观测全废）。
+  //
+  // 这一步必须在 `--check` 之前做：`--check` 会提前 `process.exit`，而它建的沙箱同样要能跑
+  // 真实回合（`dsh headless`），所以"只有启动 web 那条路径才复制凭据"是错的 —— 踩过。
+  // 权限压回 0600，且只落在沙箱目录内（原文件本来就是 0600，复制不扩大权限面）。
+  const copyCredentials = () => {
+    const credSrc = join(homedir(), '.dsh', '.credentials.yaml');
+    if (!existsSync(credSrc)) {
+      say('⚠ 宿主机没有 ~/.dsh/.credentials.yaml：需要凭据的路由在沙箱里会报 no credential');
+      return;
+    }
+    const credDst = join(HOME_, '.credentials.yaml');
+    copyFileSync(credSrc, credDst);
+    chmodSync(credDst, 0o600);
+    say('已复制 ~/.dsh/.credentials.yaml 进沙箱（0600）—— 否则 apiKeyEnv 路由全部解析不到凭据');
+  };
+  if (!flag('deploy')) copyCredentials();
+
   const BIN = findBin();
   if (flag('check')) {
     const out = execFileSync('node', [BIN, '--profile', 'web', '--dump-config'], {
@@ -382,7 +411,7 @@ function main() {
   const env = { ...process.env, DSH_HOME: HOME_ };
   const envFile = join(homedir(), '.dsh', 'env.local');
   if (existsSync(envFile)) {
-    // 密钥只进子进程环境，绝不复制进沙箱目录（多一份凭据文件就多一份泄露面）
+    // 密钥只进子进程环境，不复制文件（env.local 里的值本来就只是环境变量形态）
     for (const line of readFileSync(envFile, 'utf8').split('\n')) {
       const m = /^export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim());
       if (m !== null) env[m[1]] = m[2].replace(/^["']|["']$/g, '');
@@ -394,22 +423,72 @@ function main() {
   // （表现为"启动成功、稍后自行退出"，极易被误判成热重载或内核问题）。
   let logFd;
   try { logFd = openSync(log, 'a'); } catch (error) { die(`日志打不开 ${log}: ${String(error)}`); }
+  // 启动前的行数：下面取 URL 时只看**本次**新增的行。日志是追加写的，上一轮的 `dsh web:` 行还在，
+  // 直接全文 grep 会拿到上一轮的（旧）端口 —— 用它去连一个已经停掉的实例，结论必然错。
+  const logLinesBefore = existsSync(log) ? readFileSync(log, 'utf8').split('\n').length : 0;
   const child = spawn('node', [BIN, '--profile', 'web', '--port', GUI_PORT, '--no-open'], {
     env, cwd: HOME_, detached: true, stdio: ['ignore', logFd, logFd],
   });
   child.unref();
   try { closeSync(logFd); } catch { /* 已关 */ }
-  writeFileSync(join(HOME_, 'sbx.pid'), `${child.pid}\n`);
-  say(`已启动 pid=${child.pid}；停它请用这个 pid —— pkill -f 的模式串会匹配到调用方自己的命令行（踩过两次）`);
+  /**
+   * 记录**真正在监听的那个 node 进程** pid，而不是 `spawn` 返回的 pid。
+   *
+   * 实测教训：`dsh` 是 npx 的启动器包装，`child.pid` 可能只是一个 shell/包装进程；按它 kill
+   * 之后 node 子进程仍然活着占着端口（我据此误判过"沙箱已停"，然后一个残留实例继续跑）。
+   * 所以启动后按 DSH_HOME 反查，把实际进程的 pid 写进 pidfile（查不到才退回 child.pid）。
+   */
+  const pidFile = join(HOME_, 'sbx.pid');
+  writeFileSync(pidFile, `${child.pid}\n`);
+  const realPids = () => {
+    let out = '';
+    try { out = execFileSync('sh', ['-c', 'ls /proc | grep -E "^[0-9]+$"'], { encoding: 'utf8' }); }
+    catch { return []; }
+    const mine = [];
+    for (const p of out.split('\n')) {
+      const n = p.trim();
+      if (n === '') continue;
+      let e = '';
+      try { e = readFileSync(`/proc/${n}/environ`, 'utf8'); } catch { continue; }
+      if (e.split('\0').includes(`DSH_HOME=${HOME_}`)) {
+        try { mine.push({ pid: Number(n), cmd: readFileSync(`/proc/${n}/cmdline`, 'utf8').replace(/\0/g, ' ').trim() }); }
+        catch { /* 已退出 */ }
+      }
+    }
+    return mine;
+  };
+  const settlePid = () => {
+    const mine = realPids().filter((x) => x.cmd.includes('.bin/dsh'));
+    if (mine.length > 0) {
+      writeFileSync(pidFile, mine.map((x) => `${x.pid}`).join('\n') + '\n');
+      return mine.map((x) => x.pid);
+    }
+    return [child.pid];
+  };
+  say(`已启动 pid=${child.pid}（稍后会写回真实 node pid）；停它请用 ${pidFile} 里的 pid`
+    + ' —— `pkill -f` 的模式串会匹配到调用方自己的命令行（踩过三次）');
 
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + 45_000;
   const tick = () => {
-    const txt = existsSync(log) ? readFileSync(log, 'utf8') : '';
-    const url = (/http:\/\/127\.0\.0\.1:\d+\/\?token=[\w-]+/.exec(txt) ?? [null])[0];
+    const all = existsSync(log) ? readFileSync(log, 'utf8').split('\n') : [];
+    // 只看本次启动之后新增的行（见上面 logLinesBefore 的理由）
+    const fresh = all.slice(logLinesBefore).join('\n');
+    const url = (/http:\/\/127\.0\.0\.1:\d+\/\?token=[\w-]+/.exec(fresh) ?? [null])[0];
     if (url === null && Date.now() < deadline) { setTimeout(tick, 2000); return; }
+    const pids = settlePid();
+    const port = url === null ? '' : (/127\.0\.0\.1:(\d+)/.exec(url) ?? [])[1];
     console.log('');
-    say(`存活=${lstatSafe(`/proc/${child.pid}`) ? 'yes' : 'NO'}  ${url ?? 'URL 未就绪（看日志）'}`);
-    say(`日志 ${txt.split('\n').length} 行；端口冲突 ${/EADDRINUSE/.test(txt) ? '有 ✗' : '无 ✓'}`);
+    say(`存活=${pids.filter((p) => lstatSafe(`/proc/${p}`)).length > 0 ? 'yes' : 'NO'}  `
+      + `${url ?? 'URL 未就绪（看日志）'}`);
+    say(`pidfile 里的 pid：${pids.join('、')}（${pidFile}）`);
+    if (port !== undefined && port !== '') {
+      // 用自己的眼睛再核一次监听：日志里的 URL 只能当线索，`ss` 才是事实。
+      const listening = execFileSync('ss', ['-ltnH', `( sport = :${port} )`], { encoding: 'utf8' }).trim().length > 0;
+      say(`日志给的端口 ${port} 实际在监听=${listening ? 'yes ✓' : 'NO ✗'}`);
+    } else {
+      say('本次启动没有新的 URL 行 —— 别拿日志里的旧 URL 当本次实例（实测踩过）');
+    }
+    say(`端口冲突 ${/EADDRINUSE/.test(fresh) ? '有 ✗' : '无 ✓'}；新增日志 ${fresh.split('\n').length} 行`);
     if (greps.length > 0) {
       console.log('');
       say('读法：');

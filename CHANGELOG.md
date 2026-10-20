@@ -134,6 +134,55 @@ All notable changes to this project will be documented in this file.
   顺手改掉别人条目的状态。`dev-sandbox-smoke` 从 5 组扩到 14 组，并做了两轮变异验证：忽略 entryId、
   把整行匹配放宽成包含匹配，都能报红（第一处变异起初漏抓，原因是 fixture 把别人条目排在了后面）
 
+### 验证
+
+- **#22 在 live 宿主结项**（2026-10-20 08:48 重启后，`apply called; artifact mtime=` 证明加载的是
+  19 日 16:35 那份构建）。完整链路在真实环境读到：`completion generated` → `push refused inside
+  settings transaction … queued carriedCompletion=1` → `deferred push landed … attempts=1`
+  （37 次带续写的补写成功，平均 +1.2s，全部首次尝试即落）。`deferred _ops cleared after consume`
+  85 次成功，而 live 旧行为是 0 次 —— 载荷不再长期滞留盘上。`live settings refreshed rev=…`
+  也出现了（#19 的"改了有没有被重新读到"第一次在真实环境可观测）。
+  唯一未补回的 `rev=41` 无用户可见影响：`bceac31` 的持续捎带让后续任何一次推送都自带同一份续写
+  （其后 13 次补写落地、盘上 `_push` 现含 completion），等于这条通道对**单次推送丢失是自愈的**。
+  这层作用是本次实测才发现的，此前文档只把捎带写成"解决瞬时载荷被覆盖"。
+- 新增一节「内核代次与锚点位置」：本机内核已从 `0.2.0-rc.2` 升到 `0.2.1-rc.2`，两处锚点行号漂移
+  （`dsh-hmr` 的 ALS 三处 271/280/284 → 736/749/752；`dsh-app-boot` 的 exporter 4053-4066 →
+  4513-4515），另三处未变（`dsh-settings` 435/509/511、`bin.js` 158）。因此本文与代码注释改为
+  **按符号引用**，行号只在那一节维护一份。
+
+### 修复
+
+- **续写的五个静默出口全部留痕 + 生成链加墙钟上界**（#22 的后续；`aa146b8` + `58feb39`）：
+  `handleComplete` 原先在 `inlineEnabled=false` / 草稿太短 / 会话不存在 / 槽位被更新草稿接管
+  （then 与 catch 两处）/ 请求被 abort 这五处**直接 return 不打任何痕迹**；而 `generateCompletion` 无超时，一次挂住就永久静默。实测比例：live 一个进程里
+  `ops consumed: complete` 30 次只对应 5 次 `completion generated`，**25 次消失在无痕迹的分支里**。
+  现在七条出口各有独立 kind/reason、报文只含字符数，纯判定抽到 `src/completion-gate.ts`。
+- **超时留痕被自家节流吞掉**（同一轮里我自己造的第二个观测缺陷）：`traceFault` 按
+  `kind + faultSignature` 分桶，而签名**刻意**把 `session-<hex>` 折成 `session` → 所有会话共用
+  同一个 timeout 桶，`every: 5` 于是把第 2~4 次超时全部静音。现场表现正是"第二次停顿零痕迹"，
+  极易被误读成"上界没触发"。timeout 改为 `every: 1` 逐次必报（每次都是用户白等一整轮；
+  同一会话每个上界周期最多一条，量天然有界）。同一沙箱、同一配方、只改这一个数字做了单变量
+  反证：`every:5` 复现零痕迹，`every:1` 打出 `#1` 与 `#2`。
+- **上界监听挂错 signal**（第二条独立缺陷）：原先挂在 `deadline(upstream, …)` 的**融合** signal 上，
+  于是"复用一个已 aborted 的 controller"会让融合 signal 一出生就是 aborted → 被判成"这不是我们的
+  超时"→ **顺手撤掉 timer**，那次调用再也没有界（比原缺陷更糟：兜底被关掉）。融合 signal 中止后
+  不再发第二次事件，"上游先中止 + 底层随后卡死"同样无界。现在超时权威是独立的 timer signal，
+  交给生成链的才是 `AbortSignal.any([upstream, timer.signal])`，归属不再事后判断。
+
+### 实测事实（会改变结论的那条）
+
+- **本环境里一次健康的续写要 19~28 秒**（沙箱放开 60s 上界后实测量到 3 条：
+  `in 18971ms` / `24217ms` / `27793ms`）。因此：
+  - 第一版把上界取 20s 是**误杀**（现场就打出一条 `no settle within 20000ms … after 20001ms`，
+    那是一次本来会成功的生成），现按实测最慢一次 ×1.5 取 **45s**，仍紧于内层单 attempt 的 60s。
+  - 耗时与输出字数**不成正比**（132 字比 109 字快），固定开销主导，所以"按吞吐外推"这类
+    取值算术作废。
+  - 用户的直接体感是"停顿后没东西"，但**这次修复解决的是「查得到」，不是「快」**：留痕补齐之后，
+    5 秒等不到幽灵在这个环境下是**预期行为**。剩下的是一次产品决策（在途抑制、缩短重试链、
+    或生成中给占位指示），不属于本轮范围。
+  - live 那 25 次消失最可能的主桶是 `completion-preempted`：在途 19~28s 远大于连续打字时两次
+    停顿的间隔，每一次新停顿都会把上一次判死前的请求中止掉。
+
 ### 已知缺口
 
 按当前代码状态核对过；下面每条都还成立（原先列在这里的四项已关掉，故移除：「#17 留痕被删」与「#16 写后读回」
@@ -162,6 +211,13 @@ All notable changes to this project will be documented in this file.
   且 `startupLogs` 只在启动失败时写盘），而 `console.log` 又是 `6dfcd78` 那类"清理调试噪声"的
   删除目标。本插件用固定标记 `[dsh-suggest-ghost][ops-trace]` 区分语义留痕与调试噪声，但通道本身
   的缺失是平台问题，语义留痕长期该有正式落点
+
+- **排水锚点不是无条件可靠**：live 出现 3 次 `deferred push write refused again in the apply()-time
+  pump … pump context is inside a transaction`，其中 2 个载荷 8 次尝试耗尽后丢弃（都是
+  `carriedCompletion=0`，即非续写载荷）。含义：`apply()` 期建定时器"在事务外"这个前提在**内核反复
+  重载 profile 条目**时会失效（本机同时刷了 2290 行 `webhook@0.2.0-rc.2 incompatible with
+  dsh 0.2.1-rc.2` → 条目被反复禁用/重载）。所以锚点只在干净 boot 后稳定，靠它兜住一切写入是过度信任；
+  根治仍是诉求二（`document-updated` 改到事务外 emit）
 
 ## [0.5.0] - 2026-10-10
 

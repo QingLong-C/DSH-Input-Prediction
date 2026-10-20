@@ -1003,7 +1003,18 @@ function applyBody(ctx: Context): void {
       if (skipReason !== null) {
         if (skipReason !== lastCompletionSkip) {
           lastCompletionSkip = skipReason;
-
+          // 只按**理由变化**打（本函数每帧都跑，一次输入能刷上百次；不这么做就是重造 #21）。
+          // 用 `console.warn` 而非 `console.log`：浏览器控制台的默认级别会滤掉 log，
+          // 而这条是**语义留痕**，不是调试噪声 —— 它把"载荷没到 / 到了但属于别的会话 /
+          // 到了却与当前草稿不逐字相符 / 文本为空"四种情况分开。少了它，用户报
+          // "停顿后没东西"时客户端侧完全不可观测（实测：宿主已推送成功，客户端无任何线索）。
+          // 只打字符数，不打草稿正文（与宿主侧同款隐私约束）。
+          console.warn(
+            `[dsh-suggest-ghost][ops-trace] completion not shown: reason=${skipReason}`
+            + ` draftChars=${draft.length} payloadDraftChars=${completion?.draft?.length ?? -1}`
+            + ` completionChars=${completion?.text?.length ?? -1}`
+            + ` payloadSessionMatches=${String(settings.completionSessionId === currentId)}`,
+          );
         }
       } else {
         lastCompletionSkip = '';

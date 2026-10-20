@@ -14,6 +14,7 @@
  * 用法：node scripts/dev-sandbox-smoke.mjs
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   applyRewrites, declaredPorts, collect, findEntryId, parseRewrites, stripEntryVolatileKeys, stripKeyBlock,
 } from './dev-sandbox.mjs';
@@ -157,6 +158,29 @@ run('collect 支持同一参数重复出现', () => {
   assert.deepEqual(collect(list, 'rewrite'), ['a=b', 'c=d']);
   assert.deepEqual(collect(list, 'grep'), ['x']);
   assert.deepEqual(collect(list, 'disable'), []);
+});
+
+
+// ── 凭据与 pid 的真实缺口（都是实测踩出来的）──────────────────────────────────
+run('脚本会复制 .credentials.yaml 进沙箱（否则 apiKeyEnv 路由全部解析不到凭据）', () => {
+  const src = readFileSync(new URL('./dev-sandbox.mjs', import.meta.url), 'utf8');
+  assert.ok(/\.credentials\.yaml/.test(src), '没有复制 .credentials.yaml —— 沙箱里所有 apiKeyEnv 路由都会报 no credential');
+  assert.ok(/chmodSync\(credDst, 0o600\)/.test(src), '复制凭据后没把权限压回 0600');
+  assert.ok(/dshHomePath\('\.credentials\.yaml'\)|dsh-credentials-local/.test(src), '没写清为什么必须复制（下一个维护者会当成多余代码删掉）');
+});
+
+run('URL 只取本次启动新增的日志行（追加日志里的旧 URL 会指向已停实例）', () => {
+  const src = readFileSync(new URL('./dev-sandbox.mjs', import.meta.url), 'utf8');
+  assert.ok(/logLinesBefore/.test(src), '没有记录启动前的行数');
+  assert.ok(/all\.slice\(logLinesBefore\)/.test(src), '取 URL 时没有按新增行切片');
+});
+
+run('pidfile 写的是真实 node pid，而不是 spawn 的包装 pid', () => {
+  const src = readFileSync(new URL('./dev-sandbox.mjs', import.meta.url), 'utf8');
+  assert.ok(/DSH_HOME=\$\{HOME_\}|DSH_HOME=\$\{HOME_\}\)/.test(src) || /includes\(`DSH_HOME=\$\{HOME_\}`\)/.test(src),
+    '没有按 DSH_HOME 反查真实进程');
+  assert.ok(/settlePid/.test(src), '没有把真实 pid 写回 pidfile');
+  assert.ok(/踩过三次/.test(src), '没记下 pkill -f 会打到调用方自己这条教训');
 });
 
 console.log(`\n${process.exitCode === 1 ? '❌' : '✅'} dev-sandbox-smoke: ${cases} 组用例${process.exitCode === 1 ? '（有失败）' : '全部通过'}`);
