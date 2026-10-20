@@ -41,6 +41,7 @@ import {
   wordMatchBase,
   type DraftSnapshot,
 } from './accept-guard.ts';
+import { alignCompletion } from './completion-align.ts';
 import { buildOpsPayload, createSeqSource } from './ops-envelope.ts';
 import { nextAcceptChunk } from './chunk.ts';
 import {
@@ -991,23 +992,28 @@ function applyBody(ctx: Context): void {
       // `completion not shown` 日志，只留下一个空 if 块（删输出没删判定）。
       // 本函数每帧都跑（实测一次输入会话列表就刷上百次），所以只在**理由变化时**
       // 打一行，避免又造出一个 #21。
+      // 判定与显示共用同一次对齐结果 —— 早先这里把判据写了两遍（skipReason 一套、
+      // 显示条件一套），改动时极易只改一处（本仓库在别处踩过"两份真相互不约束"）。
+      const aligned = completion === null || completion === undefined
+        || settings.completionSessionId === null
+        || settings.completionSessionId !== currentId
+        ? null
+        : alignCompletion(draft, completion.draft, completion.text);
       const skipReason = completion === null || completion === undefined
         ? 'none'
         : settings.completionSessionId !== currentId
           ? 'other-session'
-          : completion.draft !== draft
-            ? 'draft-mismatch'
-            : completion.text === ''
-              ? 'empty-text'
-              : null;
+          : aligned !== null && !aligned.ok
+            ? aligned.reason
+            : null;
       if (skipReason !== null) {
         if (skipReason !== lastCompletionSkip) {
           lastCompletionSkip = skipReason;
           // 只按**理由变化**打（本函数每帧都跑，一次输入能刷上百次；不这么做就是重造 #21）。
           // 用 `console.warn` 而非 `console.log`：浏览器控制台的默认级别会滤掉 log，
           // 而这条是**语义留痕**，不是调试噪声 —— 它把"载荷没到 / 到了但属于别的会话 /
-          // 到了却与当前草稿不逐字相符 / 文本为空"四种情况分开。少了它，用户报
-          // "停顿后没东西"时客户端侧完全不可观测（实测：宿主已推送成功，客户端无任何线索）。
+          // 草稿与载荷无法对齐 / 文本为空"分开。少了它，用户报"停顿后没东西"时客户端侧
+          // 完全不可观测（实测：宿主已推送成功，客户端无任何线索）。
           // 只打字符数，不打草稿正文（与宿主侧同款隐私约束）。
           console.warn(
             `[dsh-suggest-ghost][ops-trace] completion not shown: reason=${skipReason}`
@@ -1019,10 +1025,8 @@ function applyBody(ctx: Context): void {
       } else {
         lastCompletionSkip = '';
       }
-      if (completion !== null && completion !== undefined
-        && settings.completionSessionId !== null && settings.completionSessionId === currentId
-        && completion.draft === draft && completion.text !== '') {
-        return { kind: 'inline', prefix: draft, suffix: completion.text, full: draft + completion.text };
+      if (aligned !== null && aligned.ok) {
+        return { kind: 'inline', prefix: draft, suffix: aligned.suffix, full: aligned.full };
       }
     }
     // 模式 1：草稿非空 → 历史前缀补全（打分制：新近度为主、频次/热度为辅）。
