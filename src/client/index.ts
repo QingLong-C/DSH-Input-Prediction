@@ -1274,13 +1274,18 @@ function applyBody(ctx: Context): void {
      * 未 inject 的属性读取直接抛），控制台是唯一落点，故用 console.warn——
      * 它是失败路径专用，与 main 清理掉的 console.log 调试噪声不是一类。
      */
+    const preview = (value: unknown, max: number): string => {
+      const s = JSON.stringify(value);
+      return (s === undefined ? 'undefined' : s).slice(0, max);
+    };
+
     const reportWrite = (mutated: unknown, rev: number, verdict: WriteVerdict | string): Promise<false> => {
       const outcome = unwrapMutateResult(mutated);
       const view = outcome.view;
       console.warn(
         `[suggest-ghost] _ops write ${String(verdict)}: expectedRevision=${rev}, `
         + `code=${String(outcome.code)}, message=${String(outcome.message).slice(0, 120)}, `
-        + `revisionAfter=${String(view?.revision)}, _opsAfter=${JSON.stringify(view?.value).slice(0, 40)}`,
+        + `revisionAfter=${String(view?.revision)}, _opsAfter=${preview(view?.value, 40)}`,
       );
       return Promise.resolve(false);
     };
