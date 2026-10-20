@@ -12,6 +12,7 @@ import {
   cleanSuggestion,
   sanitizeSuggestion,
   shouldFilterCompletion,
+  shouldFilterCompletionFor,
   stripDraftEcho,
 } from './sanitize.js';
 
@@ -69,11 +70,17 @@ export function inlinePrompt(maxChars: number, language: string): string {
 /**
  * 续写输出净化链：cleanSuggestion → stripDraftEcho → trim → filter → sanitizeSuggestion。
  * 返回净化后文本；空/不合格返回 undefined。
+ *
+ * 过滤这一环走 `shouldFilterCompletionFor(out, draft)`（而非单参的
+ * `shouldFilterCompletion`）：后者在续写场景**刻意放行**问句/助手口吻，
+ * 而「续写变成回答」正是从这个口子漏出去的。新判据 = 原语义过滤 + 一道形态兜底
+ * （输出 ≥40 字且 > 草稿 ×5 → 判为对话式回答）。详见 `src/sanitize.ts`。
+ * 调用顺序与签名 `(raw, draft, maxChars)` 未动。
  */
 export function sanitizeCompletion(raw: string, draft: string, maxChars: number): string | undefined {
   let out = cleanSuggestion(raw);
   out = stripDraftEcho(out, draft);
   out = out.trim();
-  if (out.length === 0 || shouldFilterCompletion(out)) return undefined;
+  if (out.length === 0 || shouldFilterCompletionFor(out, draft)) return undefined;
   return sanitizeSuggestion(out, maxChars).text;
 }
