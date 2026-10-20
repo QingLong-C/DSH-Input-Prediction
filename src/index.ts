@@ -245,7 +245,8 @@ function lastSuggestedTurnInLog(session: Session): number {
  * `_ops` / `_push` 通道的**语义留痕**唯一落点（模块级，所以 apply() 入口也能用）。
  *
  * ⚠️ **这里必须是 `console.log`。改回 `ctx.logger` 单通道等于把留痕删掉**：
- * 宿主全局只有一个 logger exporter（`@deepseek-ai/dsh-app-boot/lib/index.js:4053-4066`，
+ * 宿主全局只有一个 logger exporter（`@deepseek-ai/dsh-app-boot` 的 `boot()` 内，行号见
+ * `docs/internals-cordis-settings-pitfalls.md` 的代次对照表，
  * `levels:{default:2}` 挡掉 debug、回调只收 warn/error 所以 info 也丢），而它攒的
  * startupLogs 只在**启动失败**时由 `dsh/lib/bin.js:158 reportStartupFailure` 写盘
  * → 健康进程里 ctx.logger 一个字都不落任何地方。`console.log → stdout → tee
@@ -399,7 +400,6 @@ export function apply(ctx: Context, config: GenerateConfig): void {
         return;
       }
       // 服务还没注入：boot 早期属预期，静默降级成 boot 视图。
-      ctx.logger.debug?.(`dsh-suggest-ghost: live settings not ready (${String(info.reason)})`);
     },
   });
   /**
@@ -722,8 +722,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
         if (completionPending.get(sessionId) !== controller) return;
         completionPending.delete(sessionId);
         // 中止 = 被新草稿取代，不算失败；其余必须留痕。原先这里是
-        // `ctx.logger.debug?.()`，而 debug 被 exporter 的级别门直接丢弃
-        // （@deepseek-ai/dsh-app-boot/lib/index.js:4053-4066，levels.default=2），
+        // （`dsh-app-boot` 的唯一 exporter，`levels.default=2`；行号见 internals 文档的代次对照表），
         // 等于没有任何输出面——路由缺失、模型报错都曾因此查不出来。
         if (!controller.signal.aborted) {
           traceFault('completion-failed', `completion failed for session ${sessionId} after ${Date.now() - startedAt}ms: ${String(error).slice(0, 200)}`);
@@ -931,7 +930,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
    *
    * **为什么定时器能写进去、而 handler 的 await 续体不能**：`setInterval` 捕获的是
    * **建它的那一刻**的 `AsyncLocalStorage` 上下文（内核事务见
-   * `@deepseek-ai/dsh-hmr/lib/index.js:270` 的 `executing = new AsyncLocalStorage()`、
+   * `@deepseek-ai/dsh-hmr` 里的 `executing = new AsyncLocalStorage()`、
    * :280 的 `if (this.executing.getStore()) return Promise.reject(new Error("HMR
    * transactions cannot be nested"))`、:284 的 `executing.run(true, operation)`）。
    * 上下文沿 `await` / microtask / **事务内建的 timer** 传播，所以「排到下一个 tick」
@@ -1155,7 +1154,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     // `configEditor.edit()` 的回调**内**调 `this.describe()`
     // （`@deepseek-ai/dsh-settings/lib/index.js:510`），而 `describe()` 就地
     // `emit("settings/document-updated")`（同文件 :435）→ 本回调跑在
-    // `@deepseek-ai/dsh-hmr/lib/index.js:284` 的 `executing.run(true, ...)` 里 →
+    // `@deepseek-ai/dsh-hmr` 的 `executing.run(true, ...)` 里 →
     // 这里的 `update` 再进 `runExclusive`，:280 的
     // `if (this.executing.getStore()) return Promise.reject(new Error("HMR transactions cannot be nested"))`
     // 直接拒绝。**排到下一个 tick 也逃不掉**：`executing` 是 AsyncLocalStorage，

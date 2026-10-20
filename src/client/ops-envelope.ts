@@ -6,7 +6,8 @@
  * 宿主用**载荷字符串全等**给 `_ops` 去重（`src/index.ts` 的
  * `if (payload === lastOpsPayload) return;`），而「消费后清空 `_ops`」在
  * `settings/document-updated` 回调里是**结构性不可能**的：那次写入落在内核 HMR 的
- * `AsyncLocalStorage` 事务内，`runExclusive` 直接拒（`dsh-hmr/lib/index.js:279-281`），
+ * `AsyncLocalStorage` 事务内，`runExclusive` 直接拒（判据与行号见
+ * `docs/internals-cordis-settings-pitfalls.md` 的代次对照表），
  * 本机一个进程里实测失败 372/373 次（`Error: HMR transactions cannot be nested`）。
  *
  * 两件事叠起来的结果：**同一份载荷只能被消费一次，永久如此**。`pull` 侥幸躲过了

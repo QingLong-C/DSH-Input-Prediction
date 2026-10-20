@@ -210,7 +210,6 @@ const PULL_MAX_ATTEMPTS = 5;
 /** pull 重试的基础退避（毫秒），第 n 次退避 = 基础值 × 2^n。 */
 const PULL_RETRY_BASE_MS = 200;
 
-
 /** 插件名（与 manifest id 一致）。 */
 const name = 'dsh-suggest-ghost';
 /** 所需服务：会话 face + 输入机 face（幽灵必需，rc.7 fiber 激活门控）。
@@ -1004,9 +1003,7 @@ function applyBody(ctx: Context): void {
       if (skipReason !== null) {
         if (skipReason !== lastCompletionSkip) {
           lastCompletionSkip = skipReason;
-          console.log(`[suggest-ghost] completion not shown: reason=${skipReason}, draftChars=${draft.length}`
-            + (skipReason === 'draft-mismatch' && completion !== null && completion !== undefined
-              ? `, completionChars=${completion.draft.length}` : ''));
+
         }
       } else {
         lastCompletionSkip = '';
@@ -1360,9 +1357,9 @@ function applyBody(ctx: Context): void {
       if (decision.reason === 'disabled' || decision.reason === 'no-session') {
         if (lastSkipReason !== decision.reason) {
           if (decision.reason === 'disabled') {
-            console.log(`[suggest-ghost] inline skip: enabled=${settings.inlineEnabled}, bound=${bound !== null}`);
+
           } else {
-            console.log('[suggest-ghost] inline skip: no current session id');
+
           }
           lastSkipReason = decision.reason;
         }
@@ -1373,7 +1370,7 @@ function applyBody(ctx: Context): void {
     }
     lastSkipReason = null;
     const armedSessionId = decision.sessionId as string;
-    console.log(`[suggest-ghost] inline armed: delay=${decision.delayMs}, draft=${JSON.stringify(decision.draft.slice(0, 26))}, session=${armedSessionId}, reason=${decision.reason}, suppressed=${armState.suppressed}, renders{session=${renderHits.session},input=${renderHits.input},face=${renderHits.face},other=${renderHits.other}}`);
+
     inlineTriggerTimer = setTimeout(() => {
       inlineTriggerTimer = null;
       // 到期时再校验一次：草稿可能在 armed 之后被别的路径改掉（改掉会另起一张表，
@@ -1385,7 +1382,7 @@ function applyBody(ctx: Context): void {
         return;
       }
       armState = settleInlineTimer(armState, { sessionId: armedSessionId, draft: draftNow });
-      console.log('[suggest-ghost] inline trigger FIRED: sending complete op');
+
       writeOps(JSON.stringify({ rev: 0, ops: [{ op: 'complete', sessionId: armedSessionId, draft: draftNow }] }));
     }, Math.max(0, decision.dueAt! - obs.now));
   };
@@ -1628,7 +1625,7 @@ function applyBody(ctx: Context): void {
           () => { input.setDraft(accepted); },
         );
         if (!outcome.committed) {
-          console.log(`[suggest-ghost] full-accept abandoned: reason=${outcome.reason}, baseRev=${base.rev}, baseDraft=${JSON.stringify(base.draft.slice(0, 24))}`);
+
         }
       }
       overlay.hide();
@@ -1666,7 +1663,7 @@ function applyBody(ctx: Context): void {
           () => { input.setDraft(accepted); },
         );
         if (!outcome.committed) {
-          console.log(`[suggest-ghost] word-accept abandoned: reason=${outcome.reason}, baseRev=${base.rev}, baseDraft=${JSON.stringify(base.draft.slice(0, 24))}`);
+
           overlay.hide();
           shown = null;
           return;

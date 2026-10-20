@@ -549,7 +549,6 @@ export async function generateSuggestion(
       const cleaned = cleanSuggestion(text);
       if (cleaned.length === 0 || shouldFilterSuggestion(cleaned)) {
         // 空回复或不合格回复 = 正常「无建议」。归因日志：帮助诊断「这轮怎么没建议」。
-        ctx.logger.debug?.(`dsh-suggest-ghost: no usable suggestion (empty/filtered) after ${Date.now() - startedAt}ms on attempt ${attempt}/${maxAttempts} (${route.provider}/${route.model})`);
         return { suggestion: undefined, language };
       }
       const { text: suggestion, truncated } = sanitizeSuggestion(cleaned, config.maxSuggestionChars);
@@ -561,12 +560,10 @@ export async function generateSuggestion(
         truncated,
         acceptKey: config.acceptKey ?? 'Tab',
       };
-      ctx.logger.debug?.(`dsh-suggest-ghost: suggestion ready in ${Date.now() - startedAt}ms on attempt ${attempt}/${maxAttempts} (${route.provider}/${route.model})`);
       return { suggestion: suggested, language };
     } catch (error) {
       // 外部中止（新回合取代 / 卸载）不重试；最后一次尝试失败则原样抛出。
       if (signal.aborted || attempt >= maxAttempts) throw error;
-      ctx.logger.debug?.(`dsh-suggest-ghost: suggestion attempt ${attempt}/${maxAttempts} failed, retrying: ${String(error)}`);
       await backoff(signal, 1200 * attempt);
     }
   }
@@ -659,14 +656,11 @@ export async function generateCompletion(
         .join(' ');
       const text = sanitizeCompletion(raw, draft, inlineMaxChars);
       if (text === undefined) {
-        ctx.logger.debug?.(`dsh-suggest-ghost: no usable completion (empty/filtered) after ${Date.now() - startedAt}ms on attempt ${attempt}/${maxAttempts} (${route.provider}/${route.model})`);
         return { text: undefined, language };
       }
-      ctx.logger.debug?.(`dsh-suggest-ghost: completion ready in ${Date.now() - startedAt}ms on attempt ${attempt}/${maxAttempts} (${route.provider}/${route.model})`);
       return { text, language };
     } catch (error) {
       if (signal.aborted || attempt >= maxAttempts) throw error;
-      ctx.logger.debug?.(`dsh-suggest-ghost: completion attempt ${attempt}/${maxAttempts} failed, retrying: ${String(error)}`);
       await backoff(signal, 800 * attempt);
     }
   }

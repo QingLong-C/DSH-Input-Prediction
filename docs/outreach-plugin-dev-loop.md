@@ -28,7 +28,7 @@ mtime 在模块顶层求值（记的是**这次加载读到的文件**，不是�
 boot 与热重载各一行；比较时间戳即可判定"这轮观察算不算数"。
 
 > 前置事实【实测，源码定位】：健康运行的进程里 `ctx.logger` **不落任何地方** —— 全局只有一个
-> exporter（`@deepseek-ai/dsh-app-boot/lib/index.js:4053-4066`，`levels:{default:2}` 挡掉 debug，
+> exporter（`@deepseek-ai/dsh-app-boot` 的 `boot()` 内唯一一个；`levels:{default:2}` 挡掉 debug，
 > 回调只收 warn/error 所以 info 也丢），而它攒的 `startupLogs` 只在**启动失败**时由
 > `@deepseek-ai/dsh/lib/bin.js:158` 写盘。运行期唯一可见面是 `console.log` → stdout → 宿主 tee 的日志。
 > 因此这类留痕既不能用 logger，也不能被当成"调试噪声"清掉——建议用固定标记区分语义留痕与噪声。
@@ -69,7 +69,7 @@ boot 与热重载各一行；比较时间戳即可判定"这轮观察算不算�
 ## 三、顺带会撞上的两条内核语义（与插件写法有关）【实测】
 
 1. **在 `settings/document-updated` 回调链上发起的 settings 写入会被拒**：
-   `dsh-hmr/lib/index.js:271,280,284` 用 `AsyncLocalStorage` 建事务、判据是 `executing.getStore()`；
+   `@deepseek-ai/dsh-hmr` 用 `AsyncLocalStorage` 建事务（`executing.run(true, …)`）、判据是 `executing.getStore()`；
    `dsh-settings/lib/index.js:509-510` 的 `write()` 在 `configEditor.edit()` 回调内调 `describe()`，
    而 `:435` 的 `emit("settings/document-updated")` 就在 `describe()` 里同步发出。ALS 沿
    `await`/microtask/**事务内创建的 timer** 传播，所以"推迟一个 tick"不逃逸。实测五种写上下文的结论：

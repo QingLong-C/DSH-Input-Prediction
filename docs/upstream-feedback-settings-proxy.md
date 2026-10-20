@@ -176,9 +176,9 @@ API 形状本身**。三点补充观察：
 
 ```
 dsh-config-editor/lib/index.js:134      await (hmr === void 0 ? run() : hmr.runExclusive(run));
-dsh-hmr/lib/index.js:271                executing = new AsyncLocalStorage();
-dsh-hmr/lib/index.js:280                if (this.executing.getStore()) return Promise.reject(new Error("HMR transactions cannot be nested"));
-dsh-hmr/lib/index.js:284                return this.executing.run(true, operation);
+dsh-hmr  executing = new AsyncLocalStorage()            （0.2.0 是 :271，0.2.1 是 :736）
+dsh-hmr  if (this.executing.getStore()) return Promise.reject(new Error("HMR transactions cannot be nested"));
+dsh-hmr  return this.executing.run(true, operation)   （0.2.0 是 :284，0.2.1 是 :752）
 dsh-settings/lib/index.js:510           await this.ownerContext.configEditor.edit(entry, (raw, inherited) => {
                                             const descriptor = this.describe()...   ← 事务内
 dsh-settings/lib/index.js:435           ...this.ownerContext.emit("settings/document-updated", entry.options.id, revision);
@@ -269,7 +269,8 @@ dsh-suggest-ghost 分支 `fix/issue-16-18-cleanup`，基线 commit `1eb708d`；�
    请求：在插件开发文档里把这两条写在一起（现在分开写在两处，单看任一条都得不出正确结论），
    或提供一个"开发用" profile 模板把 root/ignored 一起配好。
 2. **`ctx.logger` 在健康进程里不落任何地方**。全局唯一 exporter
-   （`dsh-app-boot/lib/index.js:4053-4066`）`levels:{default:2}` 丢 debug、回调只收 warn/error 所以
+   （`dsh-app-boot` 的 `boot()` 里唯一一个 exporter；0.2.0 在 `:4053-4066`，0.2.1 在 `:4513-4515`）
+   `levels:{default:2}` 丢 debug、回调只收 warn/error 所以
    info 也丢，而 `startupLogs` 只在启动失败时由 `dsh/lib/bin.js:158` 写盘。后果是插件作者把诊断
    写进 `logger.debug/info` 后**什么都看不到**，会误判成"代码没执行"（本仓 issue #20 记过一次），
    或者反过来把 `console.log` 当唯一出路、再被下一轮"清理调试噪声"删掉语义留痕。

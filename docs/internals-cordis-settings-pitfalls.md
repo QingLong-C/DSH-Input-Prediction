@@ -23,6 +23,25 @@
 | 内核契约 | 直接引自本机 `@deepseek-ai/dsh-settings@0.2.0-rc.2` 的源码行号（核对于 2026-10-19，换内核代次需重新核对） |
 | 插件经验 | 只有本插件观测到过，内核源码与文档未确认；不要当作内核保证引用 |
 
+## 内核代次与锚点位置
+
+本文的取证都指向本机安装的闭包产物。**行号随内核代次漂移，按符号定位比按行号可靠**；下表是
+目前已核对的两代，新代次请先复核再引用（复核命令：对 `executing = new AsyncLocalStorage()`、
+`HMR transactions cannot be nested`、`emit("settings/document-updated"` 做 `grep -n`）。
+
+| 锚点（按符号） | `0.2.0-rc.2`（2026-10-19 核对） | `0.2.1-rc.2`（2026-10-20 核对） |
+|---|---|---|
+| `dsh-hmr` `executing = new AsyncLocalStorage()` | `:271` | `:736` |
+| `dsh-hmr` `runExclusive` 的 `if (this.executing.getStore()) reject("HMR transactions cannot be nested")` | `:280` | `:749` |
+| `dsh-hmr` `executing.run(true, operation)` | `:284` | `:752` |
+| `dsh-settings` `describe()` 内 `emit("settings/document-updated")` | `:435` | `:435`（另有 `:461` 第二处 emit） |
+| `dsh-settings` `write()` 在 `configEditor.edit` 回调内 `this.describe()` | `:509-510` | `:509` |
+| `dsh-settings` CAS 判据 `expected !== void 0 && …` | `:511` | `:511` |
+| `dsh-app-boot` 唯一 logger exporter（`levels:{default:2}` + 只收 warn/error） | `:4053-4066` | `:4513-4515` |
+| `dsh/lib/bin.js` `reportStartupFailure`（startupLogs 唯一写盘处） | `:158` | `:158` |
+
+其余文档与代码注释**不再各自抄行号**，一律按符号引用并指回本表。
+
 ## 通道长什么样
 
 | 方向 | 载体 | 写入方 | 读取方 | 变更通知 |
