@@ -82,12 +82,10 @@ export function hasCyrillic(text: string): boolean {
 /** 语义过滤：这些回复被当作「无建议」丢弃。 */
 const META_RE = /\b(?:no suggestion|nothing|stay silent|no response|n\/a)\b/i;
 const ERROR_ECHO_RE = /\b(?:error|exception|failed)\b.*\b(?:occurred|thrown|raised)\b/i;
-// `\b` 只认识 ASCII \w：中文词不会有词边界，若把 CJK 备选也包进 \b…\b 会永远
-// 不命中（既有 bug：好的/可以/不错/谢谢 从未被过滤）。故拆分：
-// 英文词用词边界，中文词不锚定（短文本内子串匹配足够）。
-const THANKS_RE = /\b(?:thanks|thank you|looks good|looks great|great job|well done)\b|(?:不错|谢谢|好的|可以)/i;
-const ASSISTANT_VOICE_RE = /\b(?:let me|i'?ll|i will|here'?s|i can|我来|我帮你|我来帮你|让我)\b/i;
-const QUESTION_RE = /^[¿?？]|(?:[?？]\s*$)/;
+// 只过滤整条评价/致谢；「好的」「可以」是用户的有效确认，
+// 「可以解释…吗」等追问也不能被子串规则误杀。
+const THANKS_RE = /\b(?:thanks|thank you|looks good|looks great|great job|well done)\b|^(?:不错|谢谢)[!！。.\s]*$/i;
+const ASSISTANT_VOICE_RE = /\b(?:let me|i'?ll|i will|here'?s|i can)\b|^(?:我来|我帮你|我来帮你|让我)/i;
 
 /**
  * 判为「对话式回答」的形态阈值（续写专用，取值理由见 `shouldFilterCompletionFor`）。
@@ -104,7 +102,6 @@ export function shouldFilterSuggestion(text: string): boolean {
   if (ERROR_ECHO_RE.test(text)) return true;
   if (THANKS_RE.test(text)) return true;
   if (ASSISTANT_VOICE_RE.test(text)) return true;
-  if (QUESTION_RE.test(text)) return true;
   // 孤立单词：单个字符或纯标点/符号无信息量；2 字起保留——
   // 中文里「继续」「好的」「开始」是常见且有用的确认式建议，不超过滤。
   const words = text.split(/\s+/);
@@ -122,7 +119,7 @@ export function shouldFilterCompletion(text: string): boolean {
   if (text.length > 200) return true; // 多句/过长回复
   if (META_RE.test(text)) return true;
   if (ERROR_ECHO_RE.test(text)) return true;
-  // 续写场景不过滤 THANKS_RE / ASSISTANT_VOICE_RE / QUESTION_RE
+  // 续写场景不过滤 THANKS_RE / ASSISTANT_VOICE_RE
   // 孤立单词：单个字符或纯标点/符号无信息量；2 字起保留
   const words = text.split(/\s+/);
   if (words.length === 1) {
@@ -145,8 +142,7 @@ export function shouldFilterCompletion(text: string): boolean {
  *
  * ## 为什么用形态而不是语义正则
  *
- * 想靠 `ASSISTANT_VOICE_RE` / `QUESTION_RE` 拦，就会误杀中文正常续写：这两个正则里有
- * `我来|我帮你|让我` 和 `？`，而中文草稿的续写里"你""吗""？"极其常见 —— 拦掉它们等于把
+ * 想靠助手口吻/问句正则拦，就会误杀中文正常续写：中文草稿的续写里"你""吗""？"极其常见 —— 拦掉它们等于把
  * 这个功能的常用场景一起砍掉。所以改用**与语言无关的形态特征**：真正的续写是"接着你的话
  * 往下写半句"，而回答是"成段、且相对草稿显著更长"。
  *

@@ -1,16 +1,16 @@
 {
   "name": "dsh-suggest-ghost",
-  "version": "0.6.0",
-  "description": "给 DSH 输入框加上输入预测：回合结束后自动建议你的下一句话，Tab 一键采纳；输入时按会话历史做前缀补全。输入预测 / 自动补全。",
+  "version": "0.6.0-cn.1",
+  "description": "回复结束后，在 DSH 输入框里用灰字建议下一句。支持中文追问，Tab 填入草稿，Enter 由你发送。基于上游 v0.6.0 合并。",
   "author": "WuJiaoJue",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dsh-plugin-collection/dsh-suggest-ghost.git"
+    "url": "git+https://github.com/QingLong-C/dsh-input-prediction.git"
   },
-  "homepage": "https://github.com/dsh-plugin-collection/dsh-suggest-ghost",
+  "homepage": "https://github.com/QingLong-C/dsh-input-prediction",
   "bugs": {
-    "url": "https://github.com/dsh-plugin-collection/dsh-suggest-ghost/issues"
+    "url": "https://github.com/QingLong-C/dsh-input-prediction/issues"
   },
   "type": "module",
   "icon": "./icon.svg",
@@ -22,30 +22,18 @@
       "import": "./lib/index.js"
     },
     "./client": "./lib/client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
   },
   "files": [
     "icon.svg",
     "lib",
-    "docs",
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
-    "LICENSE"
-  ],
-  "screenshots": [
-    {
-      "src": "./docs/mode-llm-real.png",
-      "label": "LLM 下一条建议（草稿为空时自动预测）"
-    },
-    {
-      "src": "./docs/mode-history-real.png",
-      "label": "历史前缀补全（输入时按会话历史匹配）"
-    },
-    {
-      "src": "./docs/settings-card.png",
-      "label": "设置卡片（section 分组 + 热度管理）"
-    }
+    "SOURCE_BASE.json",
+    "LICENSE",
+    "locale"
   ],
   "engines": {
     "node": "^22.19 || >=24",
@@ -61,7 +49,9 @@
     "check:loop": "node scripts/gitignore-check.mjs && node scripts/artifact-freshness.mjs",
     "sandbox": "node scripts/dev-sandbox.mjs --watch",
     "sandbox:check": "node scripts/dev-sandbox.mjs --check",
-    "sandbox:deploy": "node scripts/dev-sandbox.mjs --deploy ."
+    "sandbox:deploy": "node scripts/dev-sandbox.mjs --deploy .",
+    "test:cn": "node --experimental-strip-types scripts/cn-suggestions-smoke.mjs && node scripts/cn-runtime-smoke.mjs && node scripts/cn-client-smoke.mjs && node scripts/cn-host-smoke.mjs && node scripts/cn-transcript-smoke.mjs && node scripts/cn-intent-smoke.mjs && node scripts/cn-grounding-smoke.mjs",
+    "test:sync": "python3 scripts/test-sync-upstream.py"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -112,28 +102,7 @@
       ]
     }
   },
-  "sandbox": {
-    "entry": "suggest-ghost",
-    "rewrites": [
-      "port: 3081=port: 3983"
-    ],
-    "disable": [
-      "our-free-model"
-    ],
-    "greps": [
-      "apply called; artifact mtime=",
-      "completion generated",
-      "completion dropped (empty or filtered)",
-      "completion failed",
-      "push landed",
-      "push refused inside settings transaction",
-      "deferred push landed",
-      "deferred _ops cleared",
-      "live settings refreshed",
-      "completion timeout",
-      "completion preempted",
-      "completion aborted",
-      "completion skip"
-    ]
-  }
+  "contributors": [
+    "QingLong-C"
+  ]
 }

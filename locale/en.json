@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DSH-Input Prediction",
+    "description": "Suggests your next message in gray after a reply. Tab fills the draft; Enter sends it when you decide."
+  }
+}

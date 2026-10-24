@@ -92,7 +92,7 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     model: z<string, string, "volatile-defined">;
     /** LLM 下一条建议开关（默认开）；关闭后每回合不再调用建议模型。 */
     llmEnabled: z<boolean, boolean, "volatile-defined">;
-    /** 是否启用历史前缀补全。 */
+    /** 是否启用历史前缀补全（定制版默认关）。 */
     historyEnabled: z<boolean, boolean, "volatile-defined">;
     /** 是否跨会话搜索历史（false = 仅当前会话）。 */
     historyCrossSession: z<boolean, boolean, "volatile-defined">;
@@ -100,7 +100,7 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     historyMaxEntries: z<number, number, "volatile-defined">;
     /** 草稿至少输入多少字符才触发历史补全。 */
     historyMinChars: z<number, number, "volatile-defined">;
-    /** 停顿续写开关（默认开）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
+    /** 停顿续写开关（定制版默认关）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
     inlineEnabled: z<boolean, boolean, "volatile-defined">;
     /** 停顿多久后触发续写（毫秒）。 */
     inlineDelayMs: z<number, number, "volatile-defined">;
@@ -108,7 +108,7 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     inlineMinChars: z<number, number, "volatile-defined">;
     /** 续写可见字符上限。 */
     inlineMaxChars: z<number, number, "volatile-defined">;
-    /** 幽灵显示时允许 → 逐词采纳。 */
+    /** 幽灵显示时允许 → 逐词采纳（定制版默认关）。 */
     wordAccept: z<boolean, boolean, "volatile-defined">;
     /** 采纳建议的输入框快捷键（默认 Tab）。 */
     acceptKey: z<string, string, "volatile-defined">;
@@ -164,7 +164,7 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     model: z<string, string, "volatile-defined">;
     /** LLM 下一条建议开关（默认开）；关闭后每回合不再调用建议模型。 */
     llmEnabled: z<boolean, boolean, "volatile-defined">;
-    /** 是否启用历史前缀补全。 */
+    /** 是否启用历史前缀补全（定制版默认关）。 */
     historyEnabled: z<boolean, boolean, "volatile-defined">;
     /** 是否跨会话搜索历史（false = 仅当前会话）。 */
     historyCrossSession: z<boolean, boolean, "volatile-defined">;
@@ -172,7 +172,7 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     historyMaxEntries: z<number, number, "volatile-defined">;
     /** 草稿至少输入多少字符才触发历史补全。 */
     historyMinChars: z<number, number, "volatile-defined">;
-    /** 停顿续写开关（默认开）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
+    /** 停顿续写开关（定制版默认关）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
     inlineEnabled: z<boolean, boolean, "volatile-defined">;
     /** 停顿多久后触发续写（毫秒）。 */
     inlineDelayMs: z<number, number, "volatile-defined">;
@@ -180,7 +180,7 @@ declare const ConfigSchema: z<Schemastery.ObjectS<NoInfer<{
     inlineMinChars: z<number, number, "volatile-defined">;
     /** 续写可见字符上限。 */
     inlineMaxChars: z<number, number, "volatile-defined">;
-    /** 幽灵显示时允许 → 逐词采纳。 */
+    /** 幽灵显示时允许 → 逐词采纳（定制版默认关）。 */
     wordAccept: z<boolean, boolean, "volatile-defined">;
     /** 采纳建议的输入框快捷键（默认 Tab）。 */
     acceptKey: z<string, string, "volatile-defined">;

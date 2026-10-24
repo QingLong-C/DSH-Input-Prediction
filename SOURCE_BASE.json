@@ -1,0 +1,33 @@
+{
+  "package": "dsh-suggest-ghost",
+  "local_version": "0.6.0-cn.1",
+  "upstream_repository": "https://github.com/dsh-plugin-collection/dsh-suggest-ghost",
+  "upstream_commit": "12e739fdd5844362c989f69057e5766fb506ceea",
+  "license": "MIT",
+  "customized_on": "2026-10-24",
+  "changes": [
+    "Allow user follow-up questions, comparisons, explanations, next-step requests and short confirmations; preserve conversation language and empty abstentions.",
+    "Default history completion, paused inline completion and right-arrow word acceptance to off; preserve Tab-to-draft and manual Enter submission.",
+    "Hide completed-turn suggestions for nonempty drafts and dismiss the current session/turn with Escape.",
+    "Use current settings revisions with one bounded retry; refresh subscriptions when a delayed session binding becomes ready.",
+    "Abort stale prediction on the next turn start and remove previous suggestions before the next prediction.",
+    "Include session/turn identity in render keys and reattach the overlay after editor replacement.",
+    "Exclude injected rule, skill, runtime and time messages from prediction transcripts so real user intent and language survive the budget.",
+    "Read live options from authoritative settings documents after UI changes and dispose root settings listeners with the plugin.",
+    "Rebuild host/browser artifacts and add focused filter, runtime, client and host regression tests.",
+    "Use DSH-Input Prediction as the display name through exported locale metadata; retain the original technical package, settings, event and cache identities for existing installations.",
+    "Reject suggestion URLs not copied exactly from user messages, independently of model approval.",
+    "Require grounded intent evidence and reject unsupported concrete values, paths, accounts and model identifiers.",
+    "Merged upstream v0.6.0: robust settings/ops pipeline (CAS writes, deferred pushes, fault signatures), completion-answer gate, language-detection and inject-filter fixes; kept grounding checks, intent gate, JSON protocol, relaxed Chinese filters and disabled-by-default auxiliary modes."
+  ],
+  "verification_scope": "Build, seven upstream smoke groups and Chinese suggestion regression tests; live DSH installation and model verification are recorded separately.",
+  "display_name": "DSH-Input Prediction",
+  "repository": "https://github.com/QingLong-C/dsh-input-prediction",
+  "branding": {
+    "display_name": "DSH-Input Prediction",
+    "technical_package": "dsh-suggest-ghost",
+    "compatibility": "The technical package name, entry id, settings namespace, projection, events and browser storage keys are preserved so an existing installation can be updated in place."
+  },
+  "original_upstream_commit": "12e739fdd5844362c989f69057e5766fb506ceea",
+  "last_auto_sync": "2026-10-24T15:45:04.843323+00:00"
+}

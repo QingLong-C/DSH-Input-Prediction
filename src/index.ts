@@ -109,24 +109,24 @@ const EditableFields = {
   model: z.string().default('').volatile(),
   /** LLM 下一条建议开关（默认开）；关闭后每回合不再调用建议模型。 */
   llmEnabled: z.boolean().default(true).volatile(),
-  /** 是否启用历史前缀补全。 */
-  historyEnabled: z.boolean().default(true).volatile(),
+  /** 是否启用历史前缀补全（定制版默认关）。 */
+  historyEnabled: z.boolean().default(false).volatile(),
   /** 是否跨会话搜索历史（false = 仅当前会话）。 */
   historyCrossSession: z.boolean().default(false).volatile(),
   /** 历史补全最多参考的历史条目数（0 = 不限）。 */
   historyMaxEntries: z.natural().min(0).default(50).volatile(),
   /** 草稿至少输入多少字符才触发历史补全。 */
   historyMinChars: z.natural().min(1).default(1).volatile(),
-  /** 停顿续写开关（默认开）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
-  inlineEnabled: z.boolean().default(true).volatile(),
+  /** 停顿续写开关（定制版默认关）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
+  inlineEnabled: z.boolean().default(false).volatile(),
   /** 停顿多久后触发续写（毫秒）。 */
   inlineDelayMs: z.natural().min(100).default(100).volatile(),
   /** 草稿至少输入多少字符才触发续写。 */
   inlineMinChars: z.natural().min(1).default(4).volatile(),
   /** 续写可见字符上限。 */
   inlineMaxChars: z.natural().min(1).default(160).volatile(),
-  /** 幽灵显示时允许 → 逐词采纳。 */
-  wordAccept: z.boolean().default(true).volatile(),
+  /** 幽灵显示时允许 → 逐词采纳（定制版默认关）。 */
+  wordAccept: z.boolean().default(false).volatile(),
   /** 采纳建议的输入框快捷键（默认 Tab）。 */
   acceptKey: z.string().min(1).default('Tab').volatile(),
   /**
@@ -692,7 +692,7 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     // 无论哪个都不含正文（见 completion-gate 的隐私约束）。
     const draftChars = draft.length;
     const entry = decideCompletionEntry({
-      inlineEnabled: cfg.inlineEnabled !== false,
+      inlineEnabled: cfg.inlineEnabled === true,
       trimmedChars: draft.trim().length,
       inlineMinChars: cfg.inlineMinChars,
       sessionExists: session !== undefined,
@@ -1337,6 +1337,15 @@ export function apply(ctx: Context, config: GenerateConfig): void {
     const userText = userTextOfEvent(event);
     // ringPush 会先按需物化（含本事件之前的日志），无需任何「首见播种」步骤。
     if (userText !== null) ringPush(session.id, userText);
+    // 新回合开始即中止在途的旧预测并清掉上回合的残留建议（cn 定制：省 token，
+    // 失败回合也不会让旧灰字复活）；后续回合仍会生成新建议。
+    if (event.type === 'turn/start') {
+      const state = states.get(session);
+      state?.pending?.controller.abort();
+      if (state !== undefined) state.pending = undefined;
+      trackSuggestion(session.id, null);
+      pushToClient(statePushOf(session.id));
+    }
     if (event.type === 'turn/end' && event.data.reason.kind === 'completed') {
       handleTurnEnd(session, event.data.turn);
     }

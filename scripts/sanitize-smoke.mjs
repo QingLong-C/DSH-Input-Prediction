@@ -50,11 +50,11 @@ assert.equal(shouldFilterSuggestion('no suggestion for now'), true); // 套话
 assert.equal(shouldFilterSuggestion('An error occurred during the build.'), true); // 错误复述
 assert.equal(shouldFilterSuggestion('thanks for asking!'), true); // 感谢
 assert.equal(shouldFilterSuggestion('Let me look into that for you'), true); // 助手口吻
-assert.equal(shouldFilterSuggestion('What about the tests?'), true); // 提问
+assert.equal(shouldFilterSuggestion('What about the tests?'), false); // 合理追问
 assert.equal(shouldFilterSuggestion('x'.repeat(300)), true); // 过长
 // 有用建议应保留：2 字中文确认、短英文动作词
 assert.equal(shouldFilterSuggestion('继续'), false); // 2 字中文（不在 THANKS_RE，原单字规则会误杀）
-assert.equal(shouldFilterSuggestion('好的'), true); // THANKS_RE 明确过滤（作者反套话取舍），保持
+assert.equal(shouldFilterSuggestion('好的'), false); // 用户有效确认
 assert.equal(shouldFilterSuggestion('run the tests'), false);
 assert.equal(shouldFilterSuggestion('yes'), false);
 assert.equal(shouldFilterSuggestion('commit this'), false);

@@ -5,6 +5,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { Volatile } from '@deepseek-ai/cosmokit';
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import type { Session } from '@deepseek-ai/dsh-session';
 import { PROJECTION_KEY } from './domain.js';
 import type { SuggestGhostSuggested } from './domain.js';
@@ -25,7 +26,7 @@ export interface Config {
     acceptKey?: string;
     /** LLM 下一条建议开关（默认开）；关闭后每回合不再调用建议模型。 */
     llmEnabled?: boolean;
-    /** 停顿续写开关（默认开）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
+    /** 停顿续写开关（定制版默认关）；草稿非空且历史未命中时，停顿后由 LLM 续写。 */
     inlineEnabled?: boolean;
     /** 续写可见字符上限。 */
     inlineMaxChars?: number;
@@ -85,9 +86,11 @@ export declare function flattenConfig(config: ResolvedPluginConfig): FlatConfig;
 export declare function resolveConfig(config: Config): Config;
 /** 建议生成指令：只预测用户下一条提示词，禁止生成内容或元文本。 */
 export declare function systemPrompt(maxSuggestionChars: number, language: string): string;
+/** Separate intent check: an assistant offer must not become invented user consent. */
+export declare function verifySuggestion(ctx: Context, options: GenerateOptions, transcript: Transcript, candidate: string): Promise<boolean>;
 /**
  * 从会话日志构建模型可见转录：最近 `maxRecentTurns` 个已完成回合的
- * user/assistant 消息（默认 3），脱敏，依次按字符预算
+ * 真实用户/assistant 消息（默认 3），脱敏，依次按字符预算
  * （`maxTranscriptChars`）与 UTF-8 字节预算（`maxInputBytes`）截尾。
  *
  * 长会话上下文摘要（`contextSummaryEnabled` 开启时）：被裁剪掉的旧消息会

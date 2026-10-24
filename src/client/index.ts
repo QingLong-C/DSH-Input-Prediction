@@ -205,7 +205,7 @@ const SETTINGS_NAMESPACE = 'suggest-ghost';
  */
 const SETTINGS_SECTION_ID = 'suggest-ghost';
 /** 设置页导航文案（跟随宿主界面语言；无 locale 服务时回退中文）。 */
-const SECTION_LABELS = { zh: '输入预测', en: 'Input prediction' } as const;
+const SECTION_LABELS = { zh: 'DSH-Input Prediction', en: 'DSH-Input Prediction' } as const;
 /** 未获应答的 pull 最多重试次数（host 可能回一份不含历史的载荷；上限防自旋）。 */
 const PULL_MAX_ATTEMPTS = 5;
 /** pull 重试的基础退避（毫秒），第 n 次退避 = 基础值 × 2^n。 */
@@ -857,14 +857,14 @@ function applyBody(ctx: Context): void {
     /** 建议所属会话；与当前会话不符时隐藏 LLM 建议。 */
     suggestionSessionId: string | null;
   } = {
-    historyEnabled: true,
+    historyEnabled: false,
     historyCrossSession: false,
     historyMaxEntries: 50,
     historyMinChars: 1,
-    inlineEnabled: true,
+    inlineEnabled: false,
     inlineDelayMs: 100,
     inlineMinChars: 4,
-    wordAccept: true,
+    wordAccept: false,
     suggestion: cached.suggestion ?? null,
     completion: null,
     completionSessionId: null,
@@ -884,6 +884,8 @@ function applyBody(ctx: Context): void {
   let hotCountsCache: { src: readonly { text: string; count: number }[] | null; map: Map<string, number> | undefined } | null = null;
 
   /** ghostContent 结果缓存：按 (draft, settingsEpoch, composing, running, currentId) 失效。 */
+  // Escape 只忽略本会话当前回合；后续回合仍可显示新的建议（cn 定制）。
+  const dismissedSuggestions = new Set<string>();
   let ghostContentCache: {
     draft: string;
     settingsEpoch: number;
@@ -967,7 +969,7 @@ function applyBody(ctx: Context): void {
     let key: string | null = null;
     if (result !== null) {
       key = result.kind === 'llm'
-        ? `llm:${result.text}`
+        ? `llm:${currentId ?? ''}:${settings.suggestion?.turn ?? ''}:${settings.suggestion?.baseSeq ?? ''}:${result.text}`
         : `${result.kind}:${result.prefix}|${result.suffix}`;
     }
 
@@ -1074,6 +1076,9 @@ function applyBody(ctx: Context): void {
     // 对会话快照里已移除的 turnEnds）。
     const suggestion = settings.suggestion;
     if (suggestion === null || suggestion === undefined) return null;
+    // 草稿非空时隐藏已完成回合的建议；被 Escape 忽略的本回合建议同样不再显示。
+    if (draft.trim() !== '') return null;
+    if (dismissedSuggestions.has(`${currentId}:${suggestion.turn}:${suggestion.baseSeq}`)) return null;
     const stale = snapshot.running
       || (settings.suggestionSessionId !== null && settings.suggestionSessionId !== currentId);
     if (stale) return null;
@@ -1108,7 +1113,7 @@ function applyBody(ctx: Context): void {
     }
     // key 与 content 同步计算：content 非 null 时 key 必非 null。
     if (key === null) return;
-    if (shown !== null && shown.key === key) return; // 无变化
+    if (shown !== null && shown.key === key && overlay.currentTextarea?.isConnected) return; // 无变化且编辑器仍挂载
     // 复用已绑定的输入框；仅当缓存失效（React 重建/首次）时才查询 DOM。
     // 双代选择器：textarea（≤0.1.1）或 contenteditable（0.1.2 Lexical）。
     const attached = overlay.currentTextarea;
@@ -1520,14 +1525,14 @@ function applyBody(ctx: Context): void {
             }
           }
           const next: typeof settings = {
-            historyEnabled: typeof v.historyEnabled === 'boolean' ? v.historyEnabled : true,
+            historyEnabled: typeof v.historyEnabled === 'boolean' ? v.historyEnabled : false,
             historyCrossSession: typeof v.historyCrossSession === 'boolean' ? v.historyCrossSession : false,
             historyMaxEntries: typeof v.historyMaxEntries === 'number' ? v.historyMaxEntries : 50,
             historyMinChars: typeof v.historyMinChars === 'number' ? v.historyMinChars : 1,
-            inlineEnabled: typeof v.inlineEnabled === 'boolean' ? v.inlineEnabled : true,
+            inlineEnabled: typeof v.inlineEnabled === 'boolean' ? v.inlineEnabled : false,
             inlineDelayMs: typeof v.inlineDelayMs === 'number' ? v.inlineDelayMs : 100,
             inlineMinChars: typeof v.inlineMinChars === 'number' ? v.inlineMinChars : 4,
-            wordAccept: typeof v.wordAccept === 'boolean' ? v.wordAccept : true,
+            wordAccept: typeof v.wordAccept === 'boolean' ? v.wordAccept : false,
             suggestion: pushed?.suggestion === null || pushed?.suggestion === undefined
               ? null
               : (pushed.suggestion as typeof settings.suggestion),
@@ -1618,6 +1623,19 @@ function applyBody(ctx: Context): void {
       && !(focused instanceof HTMLElement && focused.isContentEditable)) return;
     if (!isComposerTarget(focused)) return;
     const content = shown.content;
+    if (event.key === 'Escape' && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (content.kind === 'llm' && settings.suggestion !== null) {
+        const dismissedId = currentSessionIdOf(sessions.list.getSnapshot());
+        dismissedSuggestions.add(`${dismissedId}:${settings.suggestion.turn}:${settings.suggestion.baseSeq}`);
+        // 只保留最近的忽略记录，长时间使用时也有内存上限。
+        if (dismissedSuggestions.size > 128) dismissedSuggestions.delete(dismissedSuggestions.values().next().value!);
+      }
+      overlay.hide();
+      shown = null;
+      return;
+    }
     // CAS 基线：这份 content **计算时**所用的草稿快照（文本 + 宿主 draftRev）。
     const base = shown.base;
     const acceptKey = content.kind === 'llm' ? content.acceptKey : DEFAULT_ACCEPT_KEY;
